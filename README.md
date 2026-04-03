@@ -1,5 +1,7 @@
 # QuestVRCTool v2.0 - ドキュメント
 
+## 現在開発中です。README通りの使用ではない可能性があります。ご了承ください。
+
 ## 概要
 Meta Quest内のVRChatスクリーンショットを、ADB経由でPC（SMBサーバー等）へ転送するGUIツールです。
 
