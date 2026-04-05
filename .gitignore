@@ -3,8 +3,6 @@ build/
 dist/
 *.exe
 *.spec
-python
-python/
 
 # Script-generated files
 config.json
