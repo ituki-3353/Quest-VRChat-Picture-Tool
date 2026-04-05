@@ -1,6 +1,0 @@
-{
-  "target_path": "S:/VRChat-Picture",
-  "rename_suffix": "_Quest",
-  "adb_auto_start": true,
-  "comment": "保存先フォルダパス、リネーム設定など。GUIで変更可能。"
-}

@@ -1,0 +1,16 @@
+# Build / packaging outputs
+build/
+dist/
+*.exe
+*.spec
+python
+python/
+
+# Script-generated files
+config.json
+scripts/config.json
+scripts/HANDOFF_DOCUMENT.md
+scripts/main.spec
+
+# Python cache
+__pycache__/
