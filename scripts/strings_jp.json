@@ -1,0 +1,54 @@
+{
+  "app_title": "Quest VRChat 写真管理ツール",
+  "status_waiting": "待機中...",
+  "status_running": "⏱ 実行中...",
+  "status_done": "✓ 完了",
+  "status_error": "✗ エラー",
+  "toolbar": {
+    "import_pics": " 写真 インポート",
+    "import_logs": " ログ インポート",
+    "settings": " 全般設定",
+    "check_adb": " ADB確認",
+    "view_log": " ログ表示",
+    "exit": " 終了"
+  },
+  "sidebar": {
+    "title": "メニュー",
+    "welcome": " ホーム",
+    "pics": " 写真 インポート設定",
+    "logs": " ログ インポート設定",
+    "settings": " 全般設定",
+    "help": " ヘルプ / ガイド"
+  },
+  "view_welcome": {
+    "header": "Quest VRChat 写真管理ツールへようこそ",
+    "description": "左メニューから各項目の詳細な設定を行うか、以下のボタンからすぐにインポートを開始できます。",
+    "import_pics": "📸 写真をインポート",
+    "import_logs": "📋 ログをインポート"
+  },
+  "view_pics": {
+    "header": " VRChat 写真管理",
+    "path_label": "📁 保存先ディレクトリ",
+    "browse": "参照",
+    "rename_label": "📝 リネーム末尾設定",
+    "rename_example": "例: photo.png -> photo_Quest.png",
+    "import_btn": " 写真をインポート"
+  },
+  "view_logs": {
+    "header": " VRChat ログ管理",
+    "path_label": "📁 PC保存先ディレクトリ",
+    "source_label": "📱 Quest側ソースパス (固定)",
+    "import_btn": " ログをインポート & マージ"
+  },
+  "view_settings": {
+    "header": " 全般設定",
+    "temp_label": "📂 一時ディレクトリ設定",
+    "adb_label": "⚙ ADB / 接続設定",
+    "adb_auto_start": "アプリ起動時にADBサーバーを自動開始",
+    "adb_test": "接続テスト実行",
+    "diag": "システム診断",
+    "save": " 設定保存",
+    "reset": " リセット",
+    "load_default": " デフォルト読込"
+  }
+}

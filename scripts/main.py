@@ -33,8 +33,38 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(APP_DIR, "config.json")
 DEFAULT_CONF_FILE = os.path.join(APP_DIR, "default_conf.json")
 VERSION_CONF_FILE = get_resource_path("version_conf.json")
+HELP_FILE = get_resource_path("help_manual.md")
+STRINGS_FILE = get_resource_path("strings_jp.json")
 LOGO_FILE = get_resource_path("logo.png")
 ICON_FILE = get_resource_path("icon.ico")
+
+def load_strings():
+    """外部ファイルからUI文字列を読み込む"""
+    if os.path.exists(STRINGS_FILE):
+        try:
+            with open(STRINGS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"文字列ファイルの読み込みエラー: {e}")
+    return {}
+
+# 文字列リソースのロード
+STR = load_strings()
+
+# アイコンキャッシュ (ガベージコレクション防止用)
+icons_cache = {}
+
+def get_icon(name, size=16):
+    """icons 配下から指定サイズのアイコンを取得し PhotoImage を返す"""
+    key = f"{name}-{size}"
+    if key not in icons_cache:
+        icon_path = get_resource_path(os.path.join("icons", f"{name}-{size}.png"))
+        if os.path.exists(icon_path):
+            try:
+                icons_cache[key] = tk.PhotoImage(file=icon_path)
+            except Exception:
+                return None
+    return icons_cache.get(key)
 
 # デフォルト設定
 DEFAULT_CONFIG = {
@@ -43,7 +73,7 @@ DEFAULT_CONFIG = {
     "temp_path": os.path.join(os.environ.get('LOCALAPPDATA', os.path.expanduser('~')), 'QVPTool'),
     "adb_auto_start": True,
     "log_target_path": r"S:\VRChat-Logs",
-    "log_source_path": "/storage/emulated/0/Android/data/com.vrchat.oculus.quest/files/Logs",
+    "log_source_path": "/storage/emulated/0/Documents/Logs",
     "comment": "保存先フォルダパス、リネーム設定、一時フォルダーパスなど。GUIで変更可能。"
 }
 
@@ -89,13 +119,12 @@ def load_logo():
     if os.path.exists(LOGO_FILE):
         try:
             logo = tk.PhotoImage(file=LOGO_FILE)
-            max_width = 240
-            max_height = 80
+            max_width = 550
+            max_height = 100
             width = logo.width()
             height = logo.height()
             if width > max_width or height > max_height:
-                factor = max(1, min(width // max_width if width > max_width else 1,
-                                    height // max_height if height > max_height else 1))
+                factor = max(1, min(width // max_width, height // max_height))
                 return logo.subsample(factor, factor)
             return logo
         except Exception as e:
@@ -218,9 +247,9 @@ def _run_import_worker():
 
     try:
         import_queue.put(("log", "\n" + "="*50))
-        import_queue.put(("log", "  VRChat Picture Import Tool"))
+        import_queue.put(("log", "  VRChat 写真インポートツール"))
         import_queue.put(("log", "="*50))
-        import_queue.put(("status", "[1/6] ADB環境確認中..."))
+        import_queue.put(("status", "[1/6] ADB環境を確認中..."))
 
         try:
             subprocess.run(["adb", "version"], capture_output=True, check=True, timeout=10, encoding='utf-8')
@@ -231,8 +260,8 @@ def _run_import_worker():
             return
 
         # ステップ2: ADBサーバー起動
-        import_queue.put(("log", "[2/6] ADBサーバー起動中..."))
-        import_queue.put(("status", "[2/6] ADBサーバー起動中..."))
+        import_queue.put(("log", "[2/6] ADBサーバーを起動中..."))
+        import_queue.put(("status", "[2/6] ADBサーバーを起動中..."))
 
         try:
             result = subprocess.run(["adb", "start-server"], capture_output=True, text=True, timeout=30, encoding='utf-8')
@@ -246,8 +275,8 @@ def _run_import_worker():
             import_queue.put(("warning", "ADBサーバー起動がタイムアウトしました。"))
 
         # ステップ3: デバイス確認
-        import_queue.put(("log", "[3/6] Quest デバイス確認中..."))
-        import_queue.put(("status", "[3/6] Quest デバイス確認中..."))
+        import_queue.put(("log", "[3/6] Quest デバイスを確認中..."))
+        import_queue.put(("status", "[3/6] Quest デバイスを確認中..."))
 
         result = subprocess.run(["adb", "devices"], capture_output=True, text=True, timeout=10, encoding='utf-8')
         if "device" not in result.stdout or "unauthorized" in result.stdout:
@@ -441,13 +470,13 @@ def _run_log_import_worker():
 
     try:
         import_queue.put(("log", "\n" + "="*50))
-        import_queue.put(("log", "  VRChat Log Import Tool"))
+        import_queue.put(("log", "  VRChat ログインポートツール"))
         import_queue.put(("log", "="*50))
-        import_queue.put(("status", "ADB確認中..."))
+        import_queue.put(("status", "ADB環境を確認中..."))
 
         # ADB 基本チェック (共通処理の簡略化版)
         try:
-            subprocess.run(["adb", "start-server"], capture_output=True, check=True, timeout=20)
+            subprocess.run(["adb", "start-server"], capture_output=True, check=True, timeout=20, encoding='utf-8')
             result = subprocess.run(["adb", "devices"], capture_output=True, text=True, encoding='utf-8')
             if "device" not in result.stdout or "unauthorized" in result.stdout:
                 import_queue.put(("error", "Questが接続されていません。"))
@@ -583,68 +612,211 @@ def run_test():
     try:
         status_var.set("▶ テスト実行中...")
 
-        test_results = []
-        test_results.append("========================================\n   テストモード\n========================================")
+        # ログウィンドウを表示して初期メッセージを出力
+        log_win.show()
+        log_win.log("\n" + "="*50)
+        log_win.log("   システム診断テスト実行")
+        log_win.log("="*50)
 
         # ADBバージョン確認
-        test_results.append("\n[テスト] ADB バージョン確認")
+        log_win.log("\n[テスト] ADB バージョン確認")
         try:
             result = subprocess.run(["adb", "version"], capture_output=True, text=True, timeout=10, encoding='utf-8')
             if result.returncode == 0:
-                test_results.append(result.stdout.strip())
+                log_win.log(result.stdout.strip())
             else:
-                test_results.append(f"ADBバージョン取得失敗: {result.stderr}")
+                log_win.log(f"ADBバージョン取得失敗: {result.stderr}")
         except (subprocess.CalledProcessError, FileNotFoundError):
-            test_results.append("ADBコマンドが見つかりません。ADBをインストールしてください。")
+            log_win.log("ADBコマンドが見つかりません。ADBをインストールしてください。")
 
         # デバイスリスト
-        test_results.append("\n[テスト] デバイス リスト")
+        log_win.log("\n[テスト] デバイス リスト")
         try:
             result = subprocess.run(["adb", "devices"], capture_output=True, text=True, timeout=10, encoding='utf-8')
-            test_results.append(result.stdout.strip() or "デバイスが見つかりません")
+            log_win.log(result.stdout.strip() or "デバイスが見つかりません")
         except subprocess.TimeoutExpired:
-            test_results.append("ADBデバイス確認がタイムアウトしました")
+            log_win.log("ADBデバイス確認がタイムアウトしました")
 
         # 設定ファイル内容
-        test_results.append("\n[テスト] 設定ファイル内容 (config.json)")
-        test_results.append("----------------------------------------")
+        log_win.log("\n[テスト] 設定ファイル内容 (config.json)")
+        log_win.log("----------------------------------------")
         if os.path.exists(CONFIG_FILE):
             try:
                 with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                     config_content = f.read()
-                test_results.append(config_content)
+                log_win.log(config_content)
             except Exception as e:
-                test_results.append(f"設定ファイル読み込みエラー: {e}")
+                log_win.log(f"設定ファイル読み込みエラー: {e}")
         else:
-            test_results.append("config.json ファイルが見つかりません。")
-        test_results.append("----------------------------------------")
+            log_win.log("config.json ファイルが見つかりません。")
+        log_win.log("----------------------------------------")
 
         # ターゲットパスの確認
-        test_results.append("\n[テスト] ターゲットパスの確認")
-        test_results.append("")
-        test_results.append("[GUI設定] config.json から読み込んだ値:")
+        log_win.log("\n[テスト] ターゲットパスの確認")
+        log_win.log("")
+        log_win.log("[GUI設定] config.json から読み込んだ値:")
         try:
             config = load_config()
-            test_results.append(f"target_path: {config.get('target_path', '未設定')}")
-            test_results.append(f"rename_suffix: {config.get('rename_suffix', '未設定')}")
-            test_results.append(f"temp_path: {config.get('temp_path', '未設定')}")
-            test_results.append(f"adb_auto_start: {config.get('adb_auto_start', '未設定')}")
+            log_win.log(f"target_path: {config.get('target_path', '未設定')}")
+            log_win.log(f"rename_suffix: {config.get('rename_suffix', '未設定')}")
+            log_win.log(f"temp_path: {config.get('temp_path', '未設定')}")
+            log_win.log(f"adb_auto_start: {config.get('adb_auto_start', '未設定')}")
         except Exception as e:
-            test_results.append(f"（設定読み込みエラー: {e}）")
-        test_results.append("")
-        test_results.append("[実行時引数] コマンドラインから渡された値:")
-        test_results.append("ターゲットパス（第2引数）: 指定されていません")
+            log_win.log(f"（設定読み込みエラー: {e}）")
+        log_win.log("")
+        log_win.log("[実行時引数] コマンドラインから渡された値:")
+        log_win.log("ターゲットパス（第2引数）: 指定されていません")
 
-        test_results.append("\n========================================\nテストモードが終了しました。")
+        log_win.log("\n" + "="*50)
+        log_win.log("診断テストが終了しました。")
+        log_win.log("="*50)
 
-        # 結果をメッセージボックスで表示
-        result_text = "\n".join(test_results)
-        messagebox.showinfo("テスト結果", result_text)
+        # ポップアップ通知
+        messagebox.showinfo("テスト完了", "診断テストが完了しました。詳細はログウィンドウを確認してください。")
         status_var.set("✓ テスト完了")
 
     except Exception as e:
         messagebox.showerror("エラー", f"テスト実行中にエラーが発生しました:\n{e}")
         status_var.set("✗ テストエラー")
+
+class LogWindow:
+    """ImgBurn風の外部ログウィンドウクラス"""
+    def __init__(self, master):
+        self.top = tk.Toplevel(master)
+        self.top.title("QVPTool - ログ")
+        self.top.geometry("600x350")
+        # ウィンドウを閉じても破棄せず非表示にするだけにする
+        self.top.protocol("WM_DELETE_WINDOW", self.hide)
+        
+        # コマンド入力エリア (先にBottomでパックして領域を確保)
+        self.cmd_frame = ttk.Frame(self.top, padding=(5, 2))
+        self.cmd_frame.pack(side=tk.BOTTOM, fill=tk.X)
+        
+        self.cmd_entry = ttk.Entry(self.cmd_frame)
+        self.cmd_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.cmd_entry.bind("<Return>", self.handle_command)
+
+        # コンテンツフレーム（ログ表示用 - 残りの中央領域をすべて占有）
+        self.content_frame = ttk.Frame(self.top)
+        self.content_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        # テキストエリアとスクロールバー
+        self.text = tk.Text(self.content_frame, state='disabled', wrap='word', font=("Courier New", 9))
+        self.scroll = ttk.Scrollbar(self.content_frame, orient=tk.VERTICAL, command=self.text.yview)
+        self.text.configure(yscrollcommand=self.scroll.set)
+        
+        self.scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        # スタートメッセージの表示
+        v, b = load_version()
+        self.log("================================================================")
+        self.log(f" QVPTool - Quest VRChat 写真管理ツール v{v}")
+        self.log(f" ビルド番号: {b}")
+        self.log("================================================================")
+        self.log("--- ログウィンドウを初期化しました ---")
+        self.log("※ '/help' と入力すると利用可能なコマンドを表示します。")
+
+    def log(self, message):
+        """ログを追記して自動スクロール"""
+        self.text.config(state='normal')
+        self.text.insert(tk.END, message + "\n")
+        self.text.see(tk.END)
+        self.text.config(state='disabled')
+
+    def handle_command(self, event):
+        """コマンド入力の処理"""
+        raw_text = self.cmd_entry.get().strip()
+        if not raw_text:
+            return
+            
+        self.cmd_entry.delete(0, tk.END)
+        self.log(f"\n# {raw_text}")
+        
+        parts = raw_text.split()
+        cmd = parts[0].lower()
+        args = parts[1:]
+        
+        if cmd == "/help":
+            self.log("利用可能なコマンド:")
+            self.log("  /help            - このヘルプを表示")
+            self.log("  /clear           - ログをクリア")
+            self.log("  /config          - 現在の設定値を一覧表示")
+            self.log("  /set <key> <val> - 設定を変更 (pics_path, logs_path, suffix)")
+            self.log("  /adb <args...>   - ADBコマンドを直接実行")
+            
+        elif cmd == "/clear":
+            self.text.config(state='normal')
+            self.text.delete(1.0, tk.END)
+            self.text.config(state='disabled')
+            self.log("--- ログをクリアしました ---")
+            
+        elif cmd == "/config":
+            self.log("現在の設定:")
+            self.log(f"  Pictures Path : {target_path_var.get()}")
+            self.log(f"  Logs Path     : {log_target_path_var.get()}")
+            self.log(f"  Suffix        : {rename_suffix_var.get()}")
+            self.log(f"  Temp Path     : {temp_path_var.get()}")
+            self.log(f"  ADB AutoStart : {adb_auto_start_var.get()}")
+            
+        elif cmd == "/set":
+            if len(args) < 2:
+                self.log("エラー: /set <key> <value> の形式で入力してください。")
+                return
+            key = args[0].lower()
+            val = " ".join(args[1:])
+            
+            if key == "pics_path":
+                target_path_var.set(val)
+                self.log(f"✓ Pictures Path を変更: {val}")
+            elif key == "logs_path":
+                log_target_path_var.set(val)
+                self.log(f"✓ Logs Path を変更: {val}")
+            elif key == "suffix":
+                rename_suffix_var.set(val)
+                self.log(f"✓ Suffix を変更: {val}")
+            else:
+                self.log(f"エラー: 不明なキー '{key}'")
+                return
+            save_settings() # 変更を反映・保存
+            
+        elif cmd == "/adb":
+            if not args:
+                self.log("エラー: ADBコマンドを指定してください。例: /adb devices")
+                return
+            threading.Thread(target=self._run_adb_cmd, args=(args,), daemon=True).start()
+            
+        else:
+            self.log(f"エラー: 未知のコマンド '{cmd}' です。")
+
+    def _run_adb_cmd(self, args):
+        """ADBコマンドを実行して結果をログに送る"""
+        try:
+            import_queue.put(("log", f"[ADB] 実行中: adb {' '.join(args)}"))
+            res = subprocess.run(["adb"] + args, capture_output=True, text=True, encoding='utf-8', timeout=15)
+            if res.stdout: import_queue.put(("log", res.stdout.strip()))
+            if res.stderr: import_queue.put(("log", f"Error: {res.stderr.strip()}"))
+        except Exception as e:
+            import_queue.put(("log", f"ADB実行エラー: {e}"))
+        
+    def show(self):
+        """メインウィンドウの右側に配置して表示"""
+        # メインウィンドウの最新の配置情報を確定させる
+        self.top.master.update_idletasks()
+        
+        # メインウィンドウの現在の座標(x, y)と横幅(w)を取得
+        main_x = self.top.master.winfo_x()
+        main_y = self.top.master.winfo_y()
+        main_w = self.top.master.winfo_width()
+        
+        # メインウィンドウの右側に10ピクセルの隙間を空けて配置 (サイズは600x350を維持)
+        self.top.geometry(f"600x350+{main_x + main_w + 10}+{main_y}")
+        
+        self.top.deiconify()
+        self.top.lift()
+        
+    def hide(self):
+        self.top.withdraw()
 
 
 # メインウィンドウ
@@ -659,9 +831,9 @@ if os.path.exists(ICON_FILE):
 
 # バージョン情報の読み込み
 version, build_number = load_version()
-root.title(f"QVPTool / Quest VRChat Picture Tool v{version} (Build {build_number})")
-root.geometry("700x750")
-root.resizable(False, False)
+root.title(f"{STR.get('app_title', 'Quest VRChat Photo Tool')} v{version}")
+root.geometry("600x550")
+root.resizable(True, True)
 
 # 設定の読み込み
 config = load_config()
@@ -671,329 +843,212 @@ temp_path_var = tk.StringVar(value=config.get("temp_path", DEFAULT_CONFIG["temp_
 adb_auto_start_var = tk.BooleanVar(value=config.get("adb_auto_start", DEFAULT_CONFIG["adb_auto_start"]))
 log_target_path_var = tk.StringVar(value=config.get("log_target_path", DEFAULT_CONFIG["log_target_path"]))
 log_source_path_var = tk.StringVar(value=config.get("log_source_path", DEFAULT_CONFIG["log_source_path"]))
-status_var = tk.StringVar(value="待機中...")
+status_var = tk.StringVar(value=STR.get("status_waiting", "待機中..."))
 
-# === タイトル部分 ===
-title_frame = ttk.Frame(root)
-title_frame.pack(pady=10, padx=10, fill=tk.X)
+def load_help_text():
+    """外部ファイルからヘルプテキストを読み込む"""
+    if os.path.exists(HELP_FILE):
+        try:
+            with open(HELP_FILE, "r", encoding="utf-8") as f:
+                content = f.read()
+            # テキスト内の {version} プレースホルダを実際のバージョンに置換
+            return content.replace("{version}", version)
+        except Exception as e:
+            return f"ヘルプファイルの読み込みに失敗しました: {e}"
+    return "ヘルプファイル(help_manual.md)が見つかりません。"
+
+status_var = tk.StringVar(value=STR.get("status_waiting", "待機中..."))
+
+# ログウィンドウの初期化
+log_win = LogWindow(root)
+log_win.show()
+
+# --- Layout (Oracle VBox Style with Header Logo) ---
+
+# 0. Header (Wide Logo Area)
+header_frame = ttk.Frame(root, padding=(0, 0))
+header_frame.pack(side=tk.TOP, fill=tk.X)
 
 logo_image = load_logo()
-if logo_image is not None:
-    logo_label = ttk.Label(title_frame, image=logo_image)
+if logo_image:
+    logo_label = ttk.Label(header_frame, image=logo_image)
     logo_label.image = logo_image
-    logo_label.pack(side=tk.LEFT)
-    title_label = ttk.Label(
-        title_frame,
-        text="",
-        font=("Arial", 18, "bold")
-    )
-    title_label.pack(side=tk.LEFT, padx=(10, 0))
-else:
-    title_label = ttk.Label(
-        title_frame,
-        text="Quest VRChat Picture Tool",
-        font=("Arial", 18, "bold")
-    )
-    title_label.pack(side=tk.LEFT)
+    logo_label.pack(side=tk.LEFT, padx=10, pady=5)
 
-version_label = ttk.Label(
-    title_frame,
-    text=f"v{version}",
-    font=("Arial", 10),
-    foreground="gray"
-)
-version_label.pack(side=tk.LEFT, padx=5)
+# 1. Toolbar (Top)
+toolbar = ttk.Frame(root, padding=5)
+toolbar.pack(side=tk.TOP, fill=tk.X)
 
-# === 警告メッセージ ===
-warning_label = ttk.Label(
-    root,
-    text="⚠ 注意: ADBサーバーが必要です / USB デバッグモードを有効にしてください",
-    font=("Arial", 9),
-    foreground="red"
-)
-warning_label.pack(pady=5, padx=10)
+def create_toolbar_btn(parent, text, icon_name, command, side=tk.LEFT):
+    icon = get_icon(icon_name, 16)
+    btn = ttk.Button(parent, text=text, command=command, image=icon, compound=tk.LEFT)
+    btn.pack(side=side, padx=2)
+    return btn
 
-# === タブウィジェット ===
-notebook = ttk.Notebook(root)
-notebook.pack(pady=10, padx=10, fill=tk.BOTH, expand=True)
+create_toolbar_btn(toolbar, STR.get("toolbar", {}).get("import_pics", " Import Pics"), "pics", run_import)
+create_toolbar_btn(toolbar, STR.get("toolbar", {}).get("import_logs", " Import Logs"), "logs", run_log_import)
+create_toolbar_btn(toolbar, STR.get("toolbar", {}).get("settings", " Settings"), "settings", lambda: switch_view("settings_item"))
 
-# ============== タブ1: 実行 ==============
-run_tab = ttk.Frame(notebook, padding=15)
-notebook.add(run_tab, text="実行")
+ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=5)
+create_toolbar_btn(toolbar, STR.get("toolbar", {}).get("check_adb", " Check ADB"), "adb", run_config)
+create_toolbar_btn(toolbar, STR.get("toolbar", {}).get("view_log", " View Log"), "viewlog", log_win.show)
+create_toolbar_btn(toolbar, STR.get("toolbar", {}).get("exit", " Exit"), "exit", root.destroy, side=tk.RIGHT)
 
-# ボタン領域
-buttons_frame = ttk.Frame(run_tab)
-buttons_frame.pack(pady=10, padx=10, fill=tk.BOTH, expand=True)
+# 2. Main Content Split (PanedWindow)
+paned = tk.PanedWindow(root, orient=tk.HORIZONTAL, borderwidth=0, sashwidth=4)
+paned.pack(fill=tk.BOTH, expand=True)
 
-# インポートボタン
-import_button = ttk.Button(
-    buttons_frame,
-    text="1️⃣  Import VRC Pictures",
-    command=run_import,
-    width=40
-)
-import_button.pack(pady=8, ipady=10)
+# Sidebar (Left)
+sidebar_frame = ttk.Frame(paned, relief="flat", padding=5)
+paned.add(sidebar_frame, width=220)
 
-# ログインポートボタン
-log_import_button = ttk.Button(
-    buttons_frame,
-    text="📋  Import & Merge VRC Logs",
-    command=run_log_import,
-    width=40
-)
-log_import_button.pack(pady=8, ipady=10)
+sidebar_label = ttk.Label(sidebar_frame, text=STR.get("sidebar", {}).get("title", "Items"), font=("Arial", 10, "bold"))
+sidebar_label.pack(anchor=tk.W, pady=(10, 5))
 
-# 設定確認ボタン
-config_button = ttk.Button(
-    buttons_frame,
-    text="3️⃣  Check Connection",
-    command=run_config,
-    width=40
-)
-config_button.pack(pady=8, ipady=10)
+sidebar_list = ttk.Treeview(sidebar_frame, show="tree", selectmode="browse", height=4) # heightは表示行数、Treeviewはデフォルトでスクロールバーなし
+sidebar_list.pack(fill=tk.BOTH, expand=True)
 
-# テストボタン
-test_button = ttk.Button(
-    buttons_frame,
-    text="3️⃣  Test Mode",
-    command=run_test,
-    width=40
-)
-test_button.pack(pady=8, ipady=10)
+# Treeviewの項目データとアイコン
+sidebar_items_data = [
+    ("welcome_item", STR.get("sidebar", {}).get("welcome", " Welcome"), "pics"),
+    ("pics_item", STR.get("sidebar", {}).get("pics", " Pictures"), "pics"),
+    ("logs_item", STR.get("sidebar", {}).get("logs", " Logs"), "logs"),
+    ("settings_item", STR.get("sidebar", {}).get("settings", " Settings"), "settings"),
+    ("help_item", STR.get("sidebar", {}).get("help", " Help"), "help"),
+]
 
-# 終了ボタン
-exit_button = ttk.Button(
-    buttons_frame,
-    text="Exit",
-    command=root.destroy,
-    width=40
-)
-exit_button.pack(pady=8, ipady=10)
+for iid, text, icon_name in sidebar_items_data:
+    icon = get_icon(icon_name, 16)
+    item_args = {"iid": iid, "text": text}
+    if icon:
+        item_args["image"] = icon
+    sidebar_list.insert('', 'end', **item_args)
 
-# ============== タブ2: 設定 ==============
-# スクロール可能なフレーム作成
-settings_frame = ttk.Frame(notebook)
-notebook.add(settings_frame, text="設定")
+ttk.Label(sidebar_frame, text=f"Build: {build_number}", font=("Arial", 7), foreground="gray").pack(side=tk.BOTTOM)
 
-# Canvas とスクロールバーの作成
-settings_canvas = tk.Canvas(settings_frame, highlightthickness=0)
-settings_scrollbar = ttk.Scrollbar(settings_frame, orient="vertical", command=settings_canvas.yview)
-settings_scrollable_frame = ttk.Frame(settings_canvas)
+# Content Area (Right)
+content_area = ttk.Frame(paned, padding=10)
+paned.add(content_area)
 
-settings_scrollable_frame.bind(
-    "<Configure>",
-    lambda e: settings_canvas.configure(scrollregion=settings_canvas.bbox("all"))
-)
+view_frames = {}
 
-settings_canvas.create_window((0, 0), window=settings_scrollable_frame, anchor="nw")
-settings_canvas.configure(yscrollcommand=settings_scrollbar.set)
+def switch_view(event_or_iid=None):
+    selected_iid = None
+    if isinstance(event_or_iid, str): # Called directly with an iid
+        selected_iid = event_or_iid
+    elif event_or_iid: # It's an event object from TreeviewSelect
+        selection = sidebar_list.selection()
+        if selection:
+            selected_iid = selection[0] # Get the iid of the selected item
 
-# Canvas とスクロールバーを配置
-settings_canvas.pack(side="left", fill="both", expand=True, padx=10, pady=10)
-settings_scrollbar.pack(side="right", fill="y", padx=(0, 10), pady=10)
+    if not selected_iid:
+        return
 
-# マウスホイール対応
-def _on_mousewheel_settings(event):
-    settings_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+    for f in view_frames.values():
+        f.pack_forget()
+    
+    # Map iid to view_name (e.g., 'pics_item' -> 'pics')
+    view_name = selected_iid.replace('_item', '')
 
-settings_canvas.bind_all("<MouseWheel>", _on_mousewheel_settings)
+    if view_name not in view_frames:
+        return
 
-# settings_tab を settings_scrollable_frame に変更
-settings_tab = settings_scrollable_frame
+    view_frames[view_name].pack(fill=tk.BOTH, expand=True)
 
-# 保存先フォルダ設定
-path_frame = ttk.LabelFrame(settings_tab, text="📁 保存先フォルダ", padding=10)
-path_frame.pack(pady=10, fill=tk.X, padx=10)
+sidebar_list.bind("<<TreeviewSelect>>", switch_view)
 
-path_label = ttk.Label(path_frame, text="保存先:", font=("Arial", 10))
-path_label.grid(row=0, column=0, sticky=tk.W, pady=5)
+# -- View Welcome (初期表示) --
+v_welcome = ttk.Frame(content_area)
+view_frames["welcome"] = v_welcome
+welcome_header = ttk.Label(v_welcome, text=STR.get("view_welcome", {}).get("header", "Welcome"), font=("Arial", 16, "bold"))
+welcome_header.pack(anchor=tk.W, pady=(10, 20), fill=tk.X)
+welcome_desc = ttk.Label(v_welcome, text=STR.get("view_welcome", {}).get("description", ""), justify=tk.LEFT)
+welcome_desc.pack(anchor=tk.W, pady=10, fill=tk.X)
 
-path_entry = ttk.Entry(path_frame, textvariable=target_path_var, width=45)
-path_entry.grid(row=0, column=1, padx=5, pady=5)
+def _on_welcome_resize(event):
+    # 親コンテナの幅に合わせてラベルの折り返し幅を調整 (パディング考慮)
+    new_wrap = event.width - 20
+    if new_wrap > 0:
+        welcome_header.configure(wraplength=new_wrap)
+        welcome_desc.configure(wraplength=new_wrap)
+v_welcome.bind("<Configure>", _on_welcome_resize)
 
-browse_button = ttk.Button(path_frame, text="参照...", command=browse_folder, width=10)
-browse_button.grid(row=0, column=2, padx=5, pady=5)
+welcome_btn_frame = ttk.Frame(v_welcome)
+welcome_btn_frame.pack(anchor=tk.W, pady=20)
 
-# ログ保存先設定
-log_path_frame = ttk.LabelFrame(settings_tab, text="📋 ログ保存先フォルダ", padding=10)
-log_path_frame.pack(pady=10, fill=tk.X, padx=10)
+ttk.Button(welcome_btn_frame, text=STR.get("view_welcome", {}).get("import_pics", "Import Pics"), 
+           command=run_import, width=30).pack(pady=5, fill=tk.X)
+ttk.Button(welcome_btn_frame, text=STR.get("view_welcome", {}).get("import_logs", "Import Logs"), 
+           command=run_log_import, width=30).pack(pady=5, fill=tk.X)
 
-log_target_label = ttk.Label(log_path_frame, text="PC保存先:", font=("Arial", 10))
-log_target_label.grid(row=0, column=0, sticky=tk.W, pady=5)
-log_target_entry = ttk.Entry(log_path_frame, textvariable=log_target_path_var, width=45)
-log_target_entry.grid(row=0, column=1, padx=5, pady=5)
-log_browse_button = ttk.Button(log_path_frame, text="参照...", command=browse_log_folder, width=10)
-log_browse_button.grid(row=0, column=2, padx=5, pady=5)
 
-log_source_label = ttk.Label(log_path_frame, text="Quest元:", font=("Arial", 10))
-log_source_label.grid(row=1, column=0, sticky=tk.W, pady=5)
-log_source_entry = ttk.Entry(log_path_frame, textvariable=log_source_path_var, width=45)
-log_source_entry.grid(row=1, column=1, padx=5, pady=5)
+# -- View 0: Pictures --
+v_pics = ttk.Frame(content_area)
+view_frames["pics"] = v_pics
+pics_icon_24 = get_icon("pics", 24)
+ttk.Label(v_pics, text=STR.get("view_pics", {}).get("header", " Pictures Manager"), font=("Arial", 14, "bold"), image=pics_icon_24, compound=tk.LEFT).pack(anchor=tk.W, pady=10)
+p_path_frame = ttk.LabelFrame(v_pics, text=STR.get("view_pics", {}).get("path_label", " Save Directory"), padding=10)
+p_path_frame.pack(fill=tk.X, pady=5)
+ttk.Entry(p_path_frame, textvariable=target_path_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+ttk.Button(p_path_frame, text=STR.get("view_pics", {}).get("browse", "Browse"), command=browse_folder).pack(side=tk.LEFT)
+p_rename_frame = ttk.LabelFrame(v_pics, text=STR.get("view_pics", {}).get("rename_label", " Rename Suffix"), padding=10)
+p_rename_frame.pack(fill=tk.X, pady=5)
+ttk.Entry(p_rename_frame, textvariable=rename_suffix_var).pack(anchor=tk.W, padx=5)
+p_rename_example = ttk.Label(p_rename_frame, text=STR.get("view_pics", {}).get("rename_example", ""), foreground="gray")
+p_rename_example.pack(anchor=tk.W, padx=5, fill=tk.X)
 
-# ファイル名リネーム設定
-rename_frame = ttk.LabelFrame(settings_tab, text="📝 ファイルリネーム", padding=10)
-rename_frame.pack(pady=10, fill=tk.X, padx=10)
+def _on_pics_resize(event):
+    new_wrap = event.width - 40
+    if new_wrap > 0:
+        p_rename_example.configure(wraplength=new_wrap)
+v_pics.bind("<Configure>", _on_pics_resize)
 
-rename_label = ttk.Label(rename_frame, text="リネーム末尾:", font=("Arial", 10))
-rename_label.grid(row=0, column=0, sticky=tk.W, pady=5)
+ttk.Button(v_pics, text=STR.get("view_pics", {}).get("import_btn", " Import"), command=run_import, width=30, image=pics_icon_24, compound=tk.LEFT).pack(pady=20)
 
-rename_entry = ttk.Entry(rename_frame, textvariable=rename_suffix_var, width=20)
-rename_entry.grid(row=0, column=1, sticky=tk.W, padx=5, pady=5)
+# -- View 1: Logs --
+v_logs = ttk.Frame(content_area)
+view_frames["logs"] = v_logs
+logs_icon_24 = get_icon("logs", 24)
+ttk.Label(v_logs, text=STR.get("view_logs", {}).get("header", " Logs Manager"), font=("Arial", 14, "bold"), image=logs_icon_24, compound=tk.LEFT).pack(anchor=tk.W, pady=10)
+l_target_frame = ttk.LabelFrame(v_logs, text=STR.get("view_logs", {}).get("path_label", " PC Save Directory"), padding=10)
+l_target_frame.pack(fill=tk.X, pady=5)
+ttk.Entry(l_target_frame, textvariable=log_target_path_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+ttk.Button(l_target_frame, text=STR.get("view_pics", {}).get("browse", "Browse"), command=browse_log_folder).pack(side=tk.LEFT)
+l_source_frame = ttk.LabelFrame(v_logs, text=STR.get("view_logs", {}).get("source_label", " Quest Source"), padding=10)
+l_source_frame.pack(fill=tk.X, pady=5)
+ttk.Entry(l_source_frame, textvariable=log_source_path_var, state="readonly").pack(fill=tk.X, padx=5)
+ttk.Button(v_logs, text=STR.get("view_logs", {}).get("import_btn", " Import & Merge"), command=run_log_import, width=30, image=logs_icon_24, compound=tk.LEFT).pack(pady=20)
 
-rename_ex_label = ttk.Label(
-    rename_frame,
-    text="例) photo.png → photo_Quest.png",
-    font=("Arial", 9),
-    foreground="gray"
-)
-rename_ex_label.grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=5)
+# -- View 2: Settings --
+v_settings = ttk.Frame(content_area)
+view_frames["settings"] = v_settings
+settings_icon_24 = get_icon("settings", 24)
+ttk.Label(v_settings, text=STR.get("view_settings", {}).get("header", " Global Settings"), font=("Arial", 14, "bold"), image=settings_icon_24, compound=tk.LEFT).pack(anchor=tk.W, pady=10)
+s_temp_frame = ttk.LabelFrame(v_settings, text=STR.get("view_settings", {}).get("temp_label", " Temp Directory"), padding=10)
+s_temp_frame.pack(fill=tk.X, pady=5)
+ttk.Entry(s_temp_frame, textvariable=temp_path_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+s_adb_frame = ttk.LabelFrame(v_settings, text=STR.get("view_settings", {}).get("adb_label", " ADB Settings"), padding=10)
+s_adb_frame.pack(fill=tk.X, pady=5)
+ttk.Checkbutton(s_adb_frame, text=STR.get("view_settings", {}).get("adb_auto_start", ""), variable=adb_auto_start_var).pack(anchor=tk.W)
+ttk.Button(s_adb_frame, text=STR.get("view_settings", {}).get("adb_test", ""), command=run_config).pack(anchor=tk.W, pady=5)
+ttk.Button(s_adb_frame, text=STR.get("view_settings", {}).get("diag", ""), command=run_test).pack(anchor=tk.W)
+s_btn_frame = ttk.Frame(v_settings, padding=10)
+s_btn_frame.pack(fill=tk.X, pady=20)
+ttk.Button(s_btn_frame, text=STR.get("view_settings", {}).get("save", " Save"), command=save_settings, image=get_icon("save", 16), compound=tk.LEFT).pack(side=tk.LEFT, padx=5)
+ttk.Button(s_btn_frame, text=STR.get("view_settings", {}).get("reset", " Reset"), command=reset_settings, image=get_icon("reset", 16), compound=tk.LEFT).pack(side=tk.LEFT, padx=5)
+ttk.Button(s_btn_frame, text=STR.get("view_settings", {}).get("load_default", " Load Default"), command=load_default_settings, image=get_icon("load", 16), compound=tk.LEFT).pack(side=tk.LEFT, padx=5)
 
-# 一時フォルダー設定
-temp_frame = ttk.LabelFrame(settings_tab, text="📂 一時フォルダー", padding=10)
-temp_frame.pack(pady=10, fill=tk.X, padx=10)
 
-temp_label = ttk.Label(temp_frame, text="一時保存先:", font=("Arial", 10))
-temp_label.grid(row=0, column=0, sticky=tk.W, pady=5)
+# -- View 3: Help --
+v_help = ttk.Frame(content_area)
+view_frames["help"] = v_help
+tk.Text(v_help, wrap=tk.WORD, font=("Courier New", 9), height=15).pack(fill=tk.BOTH, expand=True)
+v_help.winfo_children()[0].insert(1.0, load_help_text())
+v_help.winfo_children()[0].config(state=tk.DISABLED)
 
-temp_entry = ttk.Entry(temp_frame, textvariable=temp_path_var, width=45)
-temp_entry.grid(row=0, column=1, padx=5, pady=5)
-
-def browse_temp_folder():
-    """一時フォルダー選択ダイアログを開く"""
-    current_path = temp_path_var.get()
-    folder = filedialog.askdirectory(
-        title="一時フォルダーを選択",
-        initialdir=current_path if os.path.exists(current_path) else os.path.expanduser("~")
-    )
-    if folder:
-        temp_path_var.set(folder)
-        save_settings()
-
-temp_browse_button = ttk.Button(temp_frame, text="参照...", command=browse_temp_folder, width=10)
-temp_browse_button.grid(row=0, column=2, padx=5, pady=5)
-
-temp_info_label = ttk.Label(
-    temp_frame,
-    text="ファイルの転送後、一時的に保存されてからリネーム・移動されます",
-    font=("Arial", 9),
-    foreground="gray"
-)
-temp_info_label.grid(row=1, column=0, columnspan=3, sticky=tk.W, pady=5)
-
-# ADB設定
-adb_frame = ttk.LabelFrame(settings_tab, text="⚙️ ADB設定", padding=10)
-adb_frame.pack(pady=10, fill=tk.X, padx=10)
-
-adb_check = ttk.Checkbutton(
-    adb_frame,
-    text="実行時にADBサーバーを自動起動",
-    variable=adb_auto_start_var
-)
-adb_check.pack(anchor=tk.W, pady=5)
-
-# ボタングループ
-button_group = ttk.Frame(settings_tab)
-button_group.pack(pady=20, fill=tk.X, padx=10)
-
-save_button = ttk.Button(
-    button_group,
-    text="💾 設定を保存",
-    command=save_settings,
-    width=20
-)
-save_button.pack(side=tk.LEFT, padx=5)
-
-reset_button = ttk.Button(
-    button_group,
-    text="🔄 リセット",
-    command=reset_settings,
-    width=20
-)
-reset_button.pack(side=tk.LEFT, padx=5)
-
-default_button = ttk.Button(
-    button_group,
-    text="📥 デフォルト読み込み",
-    command=load_default_settings,
-    width=20
-)
-default_button.pack(side=tk.LEFT, padx=5)
-
-# ============== タブ3: 説明 ==============
-help_tab = ttk.Frame(notebook, padding=15)
-notebook.add(help_tab, text="説明")
-
-# スクロール可能なテキスト領域
-help_text_frame = ttk.Frame(help_tab)
-help_text_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-
-# スクロールバー付きテキスト
-scrollbar = ttk.Scrollbar(help_text_frame)
-scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-
-help_text = tk.Text(
-    help_text_frame,
-    wrap=tk.WORD,
-    yscrollcommand=scrollbar.set,
-    font=("Courier New", 9),
-    height=20
-)
-help_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-scrollbar.config(command=help_text.yview)
-
-# テキスト内容
-help_content = rf"""【Quest VRChat Tool v{version} - 使用ガイド】
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📌 ツール概要
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Meta Quest内のVRChatスクリーンショットをADB経由でPCへ転送し、
-自動的にファイルをリネームするツールです。
-
-【重要】コンソールウィンドウとの同時表示
-本ツールは別々のコンソールウィンドウに処理ログを表示します。
-GUIと同時にコンソール出力を確認できます。
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🎯 必要な環境
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-✓ Meta Quest（VRChat対応機種）
-✓ Android Debug Bridge（ADB）をインストール
-✓ Questの「開発者モード」を有効化
-✓ 「USB デバッグモード」を有効化
-✓ Quest と PC を USB ケーブルで接続
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🔧 各タブの役割
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-【実行】タブ
-  1️⃣ Import VRC Pictures
-     → VRChatスクリーンショットを転送・リネーム
-     → コンソール に進捗を表示
-
-  2️⃣ Check Connection
-     → Questの接続状況を確認
-
-  3️⃣ Test Mode
-     → ADB、デバイス、設定を確認
-
-  Exit → アプリケーション終了
-
-【設定】タブ
-  💾 設定を保存
-     → すべての設定を config.json に保存
-
-  🔄 リセット
-     → デフォルト設定に戻す（確認あり）
-
-  📥 デフォルト読み込み
-     → デフォルト値を読み込む
-     → config.json と default_conf.json に保存
-"""
-
-help_text.insert(1.0, help_content)
-help_text.config(state=tk.DISABLED)
+# Init view
+sidebar_list.selection_set('welcome_item') # ホームを初期選択
+switch_view('welcome_item') # 初期画面を表示
 
 # === ステータスバー ===
 status_frame = ttk.Frame(root, relief=tk.SUNKEN, borderwidth=1)
@@ -1013,6 +1068,7 @@ def process_queue():
             if msg_type == "log":
                 # ログをコンソールに出力
                 print(msg_data[0])
+                log_win.log(msg_data[0])
                 
             elif msg_type == "status":
                 # ステータスバーを更新
