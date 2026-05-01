@@ -1,0 +1,17 @@
+Version list
+=============================
+2026/04/05 02:01:28  : Version 0.1 alpha Build_202504050201728-beta
+- New Pre-Release.
+=============================
+2026/04/21 11:10:21  : Version 0.2 beta Build_-
+- Release discarded due to a critical bug.
+=============================
+2026/04/22 00:02:03  : Version 0.3 beta Build_-
+- Due to a bug in the ADB system, this issue will be carried over to the next release. (Not publicly disclosed)
+=============================
+2026/04/29 00:00:03  : Version 0.4 beta Build_-
+- Due to an unexplained error, development was restarted after restoring from a Git backup. (Deleted)
+=============================
+2026/05/01 19:12:10  : Version 0.5 beta Build_20250501191210-beta
+- UI improvements and updates. The build ID naming convention will be changed starting with the next build.
+=============================
