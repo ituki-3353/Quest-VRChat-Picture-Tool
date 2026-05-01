@@ -42,6 +42,8 @@ DEFAULT_CONFIG = {
     "rename_suffix": "_Quest",
     "temp_path": os.path.join(os.environ.get('LOCALAPPDATA', os.path.expanduser('~')), 'QVPTool'),
     "adb_auto_start": True,
+    "log_target_path": r"S:\VRChat-Logs",
+    "log_source_path": "/storage/emulated/0/Android/data/com.vrchat.oculus.quest/files/Logs",
     "comment": "保存先フォルダパス、リネーム設定、一時フォルダーパスなど。GUIで変更可能。"
 }
 
@@ -111,6 +113,17 @@ def browse_folder():
         target_path_var.set(folder)
         save_settings()
 
+def browse_log_folder():
+    """ログ保存先フォルダ選択ダイアログを開く"""
+    current_path = log_target_path_var.get()
+    folder = filedialog.askdirectory(
+        title="ログ保存先フォルダを選択",
+        initialdir=current_path if os.path.exists(current_path) else os.path.expanduser("~")
+    )
+    if folder:
+        log_target_path_var.set(folder)
+        save_settings()
+
 def save_settings():
     """設定タブの入力値をconfig.jsonに保存"""
     config = {
@@ -118,6 +131,8 @@ def save_settings():
         "rename_suffix": rename_suffix_var.get(),
         "temp_path": temp_path_var.get(),
         "adb_auto_start": adb_auto_start_var.get(),
+        "log_target_path": log_target_path_var.get(),
+        "log_source_path": log_source_path_var.get(),
         "comment": "保存先フォルダパス、リネーム設定、一時フォルダーパスなど。GUIで変更可能。"
     }
     if save_config(config):
@@ -130,6 +145,8 @@ def reset_settings():
         rename_suffix_var.set(DEFAULT_CONFIG["rename_suffix"])
         temp_path_var.set(DEFAULT_CONFIG["temp_path"])
         adb_auto_start_var.set(DEFAULT_CONFIG["adb_auto_start"])
+        log_target_path_var.set(DEFAULT_CONFIG["log_target_path"])
+        log_source_path_var.set(DEFAULT_CONFIG["log_source_path"])
         save_settings()
         status_var.set("✓ 設定をリセットしました")
 
@@ -141,6 +158,8 @@ def load_default_settings():
         rename_suffix_var.set(DEFAULT_CONFIG["rename_suffix"])
         temp_path_var.set(DEFAULT_CONFIG["temp_path"])
         adb_auto_start_var.set(DEFAULT_CONFIG["adb_auto_start"])
+        log_target_path_var.set(DEFAULT_CONFIG["log_target_path"])
+        log_source_path_var.set(DEFAULT_CONFIG["log_source_path"])
         
         # config.json に保存
         config = {
@@ -148,6 +167,8 @@ def load_default_settings():
             "rename_suffix": rename_suffix_var.get(),
             "temp_path": temp_path_var.get(),
             "adb_auto_start": adb_auto_start_var.get(),
+            "log_target_path": log_target_path_var.get(),
+            "log_source_path": log_source_path_var.get(),
             "comment": "保存先フォルダパス、リネーム設定、一時フォルダーパスなど。GUIで変更可能。"
         }
         
@@ -164,7 +185,9 @@ def load_default_settings():
             "target_path": DEFAULT_CONFIG["target_path"],
             "rename_suffix": DEFAULT_CONFIG["rename_suffix"],
             "temp_path": DEFAULT_CONFIG["temp_path"],
-            "adb_auto_start": DEFAULT_CONFIG["adb_auto_start"]
+            "adb_auto_start": DEFAULT_CONFIG["adb_auto_start"],
+            "log_target_path": DEFAULT_CONFIG["log_target_path"],
+            "log_source_path": DEFAULT_CONFIG["log_source_path"]
         }
         
         try:
@@ -406,6 +429,120 @@ def run_import():
     import_thread.start()
 
 
+def _run_log_import_worker():
+    """VRChat ログファイルをインポート・マージ（別スレッド）"""
+    target_path = log_target_path_var.get()
+    source_path = log_source_path_var.get()
+    temp_path = os.path.join(temp_path_var.get(), "Logs_Temp")
+
+    if not target_path.strip():
+        import_queue.put(("error", "ログ保存先フォルダを指定してください。"))
+        return
+
+    try:
+        import_queue.put(("log", "\n" + "="*50))
+        import_queue.put(("log", "  VRChat Log Import Tool"))
+        import_queue.put(("log", "="*50))
+        import_queue.put(("status", "ADB確認中..."))
+
+        # ADB 基本チェック (共通処理の簡略化版)
+        try:
+            subprocess.run(["adb", "start-server"], capture_output=True, check=True, timeout=20)
+            result = subprocess.run(["adb", "devices"], capture_output=True, text=True, encoding='utf-8')
+            if "device" not in result.stdout or "unauthorized" in result.stdout:
+                import_queue.put(("error", "Questが接続されていません。"))
+                return
+        except Exception as e:
+            import_queue.put(("error", f"ADBエラー: {e}"))
+            return
+
+        # フォルダ準備
+        os.makedirs(target_path, exist_ok=True)
+        if os.path.exists(temp_path):
+            import shutil
+            shutil.rmtree(temp_path)
+        os.makedirs(temp_path, exist_ok=True)
+
+        # ステップ1: ファイル転送
+        import_queue.put(("log", f"[1/2] ログ転送中...\n ソース: {source_path}"))
+        import_queue.put(("status", "ログ転送中..."))
+        
+        process = subprocess.Popen(
+            ["adb", "pull", source_path, temp_path],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8'
+        )
+        process.wait(timeout=120)
+
+        if process.returncode != 0:
+            # フォルダが空、もしくはパスが存在しない場合のハンドリング
+            import_queue.put(("log", "⚠ 転送に失敗したか、ファイルが見つかりません。"))
+            import_queue.put(("info", "Quest側にログファイルが見つかりませんでした。"))
+            return
+
+        # ステップ2: マージ処理
+        import_queue.put(("log", "[2/2] ログマージ処理中..."))
+        import_queue.put(("status", "マージ処理中..."))
+        
+        # pullした結果、temp_path の中に 'Logs' というサブフォルダができる場合があるため調整
+        pulled_logs_dir = temp_path
+        if os.path.exists(os.path.join(temp_path, "Logs")):
+            pulled_logs_dir = os.path.join(temp_path, "Logs")
+
+        merged_count = 0
+        new_count = 0
+        
+        for file in os.listdir(pulled_logs_dir):
+            if not file.endswith(".txt"): continue
+            
+            src_file = os.path.join(pulled_logs_dir, file)
+            dst_file = os.path.join(target_path, file)
+
+            if os.path.exists(dst_file):
+                # マージ処理（追記）
+                try:
+                    with open(src_file, "rb") as f_src:
+                        new_data = f_src.read()
+                    
+                    with open(dst_file, "ab") as f_dst:
+                        # 既存ファイルとの境界を分かりやすくするためのヘッダー（任意）
+                        f_dst.write(b"\n--- QUEST_IMPORT_MERGE_DATA ---\n")
+                        f_dst.write(new_data)
+                    merged_count += 1
+                except Exception as e:
+                    import_queue.put(("log", f" ✗ マージ失敗: {file} ({e})"))
+            else:
+                # 新規コピー
+                try:
+                    import shutil
+                    shutil.copy2(src_file, dst_file)
+                    new_count += 1
+                except Exception as e:
+                    import_queue.put(("log", f" ✗ コピー失敗: {file} ({e})"))
+
+        # クリーンアップ
+        try:
+            import shutil
+            shutil.rmtree(temp_path)
+        except: pass
+
+        import_queue.put(("log", f"✓ 完了: 新規 {new_count}件, マージ {merged_count}件"))
+        import_queue.put(("success", f"ログのインポートが完了しました！\n\n・新規追加: {new_count}件\n・マージ(追記): {merged_count}件"))
+        import_queue.put(("done", "completed"))
+
+    except Exception as e:
+        import_queue.put(("log", f"✗ エラー: {e}"))
+        import_queue.put(("error", f"ログ処理中にエラーが発生しました:\n{e}"))
+
+def run_log_import():
+    """ログインポート実行（スレッド起動）"""
+    global import_thread
+    if import_thread and import_thread.is_alive():
+        messagebox.showwarning("警告", "既に処理中です。完了するまでお待ちください。")
+        return
+    status_var.set("⏱ ログ取得中...")
+    import_thread = threading.Thread(target=_run_log_import_worker, daemon=True)
+    import_thread.start()
+
 def run_config():
     """接続状況を確認（Python実装）"""
     try:
@@ -532,6 +669,8 @@ target_path_var = tk.StringVar(value=config.get("target_path", DEFAULT_CONFIG["t
 rename_suffix_var = tk.StringVar(value=config.get("rename_suffix", DEFAULT_CONFIG["rename_suffix"]))
 temp_path_var = tk.StringVar(value=config.get("temp_path", DEFAULT_CONFIG["temp_path"]))
 adb_auto_start_var = tk.BooleanVar(value=config.get("adb_auto_start", DEFAULT_CONFIG["adb_auto_start"]))
+log_target_path_var = tk.StringVar(value=config.get("log_target_path", DEFAULT_CONFIG["log_target_path"]))
+log_source_path_var = tk.StringVar(value=config.get("log_source_path", DEFAULT_CONFIG["log_source_path"]))
 status_var = tk.StringVar(value="待機中...")
 
 # === タイトル部分 ===
@@ -595,10 +734,19 @@ import_button = ttk.Button(
 )
 import_button.pack(pady=8, ipady=10)
 
+# ログインポートボタン
+log_import_button = ttk.Button(
+    buttons_frame,
+    text="📋  Import & Merge VRC Logs",
+    command=run_log_import,
+    width=40
+)
+log_import_button.pack(pady=8, ipady=10)
+
 # 設定確認ボタン
 config_button = ttk.Button(
     buttons_frame,
-    text="2️⃣  Check Connection",
+    text="3️⃣  Check Connection",
     command=run_config,
     width=40
 )
@@ -665,6 +813,22 @@ path_entry.grid(row=0, column=1, padx=5, pady=5)
 
 browse_button = ttk.Button(path_frame, text="参照...", command=browse_folder, width=10)
 browse_button.grid(row=0, column=2, padx=5, pady=5)
+
+# ログ保存先設定
+log_path_frame = ttk.LabelFrame(settings_tab, text="📋 ログ保存先フォルダ", padding=10)
+log_path_frame.pack(pady=10, fill=tk.X, padx=10)
+
+log_target_label = ttk.Label(log_path_frame, text="PC保存先:", font=("Arial", 10))
+log_target_label.grid(row=0, column=0, sticky=tk.W, pady=5)
+log_target_entry = ttk.Entry(log_path_frame, textvariable=log_target_path_var, width=45)
+log_target_entry.grid(row=0, column=1, padx=5, pady=5)
+log_browse_button = ttk.Button(log_path_frame, text="参照...", command=browse_log_folder, width=10)
+log_browse_button.grid(row=0, column=2, padx=5, pady=5)
+
+log_source_label = ttk.Label(log_path_frame, text="Quest元:", font=("Arial", 10))
+log_source_label.grid(row=1, column=0, sticky=tk.W, pady=5)
+log_source_entry = ttk.Entry(log_path_frame, textvariable=log_source_path_var, width=45)
+log_source_entry.grid(row=1, column=1, padx=5, pady=5)
 
 # ファイル名リネーム設定
 rename_frame = ttk.LabelFrame(settings_tab, text="📝 ファイルリネーム", padding=10)
