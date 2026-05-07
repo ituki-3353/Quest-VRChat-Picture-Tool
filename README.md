@@ -1,144 +1,58 @@
-# QuestVRCTool
+# QVT-Tool 
+QuestとWindowsをつなぐインポートツール
 
 ## 概要
-QuestVRCTool は、Meta Quest 内の VRChat スクリーンショットを ADB 経由で PC に転送し、リネームして保存する Windows 向けツールです。
+Quest単騎だとWindows側で写真を見るのがめんどくさい...
+オフラインで写真データをインポートしたい
+デバッグログをwindowsでみたい！（Questだと1mb以上のテキストは既定で見れない）
 
-- GUI 版フロントエンド: `scripts/main.py`
-- Quest 側操作: `quest_tool.bat`
-- 設定保存: `config.json`, `default_conf.json`, `version_conf.json`
-- アイコン: `scripts/icon.ico`
-- タイトルロゴ: `scripts/logo.png`
+そんなVRChatterのためのWindows専用ソフトです。
 
-このリポジトリは Git で配布・管理することを想定しています。
+使い方は簡単！
+- 起動
+- 場所指定
+- インポートボタンを押す
+たったこれだけ 3ステップ！
 
 ## 目次
+- [インストール方法・使い方](#インストール方法・使い方)
+- [注意点](#注意点)
 
-- [必要要件](#必要要件)
-- [リポジトリ構成](#リポジトリ構成)
-- [ソースから起動](#ソースから起動)
-- [実行ファイルのビルド](#実行ファイルのビルド)
-- [使い方](#使い方)
-- [設定ファイル](#設定ファイル)
-- [トラブルシューティング](#トラブルシューティング)
-- [ライセンス](#ライセンス)
+## インストール方法・使い方
 
-## 必要要件
+### 使い方
+1. Githubの Release から該当するビルドを選択して、zipファイルをダウンロードします。
+2. ZipファイルをWindowsエクスプローラー、もしくはWinZipや7Zip等のサードパーティで解凍します。
+3. QuestVRCTool.exe を起動します。
+WindowsDefenderが起動した場合は無視して、「詳細」▶「実行」を押してください。
+※本アプリケーションにウイルスは含まれていないためご安心ください。（稀にwindowsが誤検知する場合があるためです。）
+4. 起動したらインポートしたい種類の項目を選択して、上部設定欄のインポート先のフォルダーを指定します。
+5. 下部にあるインポート開始ボタンを押下します。
+6. 結果がポップアップウィンドウに表示され、ログウィンドウに詳細な結果が表示されます。
 
-- Windows 10 / Windows 11
-- Python 3.11 以上
-- `tkinter`（標準ライブラリ）
-- ADB（Android Debug Bridge）
-  - Android SDK Platform-Tools をインストール
-  - `adb` が `PATH` に通っていること
-- PyInstaller（実行ファイルを作成する場合）
+### Q&A
+Q.なんでWindows Smart Screnn(Windows Defender)が起動するの？
+A.外部ツール・アプリケーションで発行元が確認できない場合に警告されてしまうからです。これに関しては仕様ですので無視してもらって大丈夫です。
 
-### 推奨インストール
+Q.全般設定の一時フォルダーって？
+A.画像・ログなどを一時的に保存してリネーム・マージを行うためのフォルダーです。必ず管理者権限が必要ない場所を選択してください、
 
-```powershell
-python -m pip install pyinstaller
-```
+Q.ビルドはどれ選べばいい？
+A.とりあえず最新のやつを選べば大丈夫です。
+ビルド番号は日付の数列で管理しているので、ご参考までに。
 
-## リポジトリ構成
+## 注意点
+### 本システムはADBを使用しています
+ADBは、Android系OSとの有線通信をするための、Google公式が無料で公開しているツールです。Meta QuestにインストールされているHorizon OSはAndroidベースのため、ADBを使用して通信できる利点を最大限に活かせるようなアプリケーションとして開発しています。
+ADBがインストールされていない場合は、Google公式Android Developer potalよりインストールをお願いします。
 
-```
-QuestVRC/
-├── .gitignore
-├── LICENSE
-├── README.md
-├── QuestVRCTool.exe         # 既存ビルドがある場合
-├── QuestVRCTool.spec
-├── dist/                    # PyInstaller 出力フォルダ
-├── build/                   # PyInstaller ビルドフォルダ
-├── main.spec                # ルートの PyInstaller spec
-└── scripts/
-    ├── main.py              # メイン GUI アプリ
-    ├── quest_tool.bat       # ADB/Quest 処理バッチ
-    ├── config.json          # 実行時に読み書きされる設定ファイル
-    ├── default_conf.json    # デフォルト設定保存用
-    ├── version_conf.json    # バージョン番号・ビルド番号
-    ├── icon.ico             # ウィンドウ／EXE アイコン
-    ├── logo.png             # タイトルロゴ
-    └── main.spec            # scripts 用 PyInstaller spec
-```
 
-## ソースから起動
+### Quest側で接続を許可してください。
+Quest側で、初回接続時は「本デバイスへのデバッグ接続を許可しますか？」という画面が表示されます。
+その際は「このPCへの接続を常に許可する」にチェックを入れた状態で許可を押してください。
+許可しない場合、ADBツール及びWindowsがQuestを認識せず、インポートができません。
 
-1. リポジトリをクローン／展開
-2. PowerShell でリポジトリルートに移動
-3. 次のコマンドを実行
+### 充電状態とバッテリー残量にご注意ください
+通常のデータ通信専用USBだと、Quest側の充電が限りなく低速になり、Questのバッテリー残量が減少します。ご注意ください。
 
-```powershell
-python scripts/main.py
-```
 
-> `scripts/main.py` は、実行中のファイルのある場所に `config.json` を保存します。
-> - ソース実行時: `scripts\config.json`
-> - EXE 実行時: 実行ファイルと同じフォルダ内
-
-## 実行ファイルのビルド
-
-Git で配布する場合、ソースを配布するか、または PyInstaller でバイナリを作成します。
-
-```powershell
-cd C:\Users\ituki\Desktop\QuestVRC
-python -m PyInstaller --onefile --windowed --name QuestVRCTool --icon=scripts/icon.ico --add-data "scripts/config.json;." --add-data "scripts/default_conf.json;." --add-data "scripts/version_conf.json;." --add-data "scripts/logo.png;." scripts/main.py
-```
-
-ビルドが成功すると、`dist\QuestVRCTool.exe` が作成されます。
-
-## 使い方
-
-1. `QuestVRCTool.exe` または `python scripts/main.py` で起動
-2. GUI で保存先フォルダを設定
-3. `Import VRC Pictures` を実行して Quest から画像を取り込む
-4. `Check Connection` で接続状況を確認
-5. `Test Mode` で ADB 接続・デバイス状態を検証
-
-### 画面の主な操作
-
-- `保存先フォルダ`: スクリーンショットを保存するフォルダを指定
-- `ADB auto start`: ADB を自動起動するかどうか
-- `Load Default Settings`: デフォルト設定を `config.json` と `default_conf.json` に書き出す
-
-## 設定ファイル
-
-- `config.json`: 実行時に読み書きされる現在設定
-- `default_conf.json`: デフォルト値のバックアップ
-- `version_conf.json`: アプリ版数とビルド番号
-
-### version_conf.json の例
-
-```json
-{
-  "version": "0.3.0 beta",
-  "build_number": "202504050201728-beta"
-}
-```
-
-## トラブルシューティング
-
-### ADB が見つからない
-
-- `adb` がインストールされていない、または PATH に含まれていない場合、GUI 内でエラーが表示されます。
-- `Android SDK Platform-Tools` をインストールし、`adb` をコマンドラインで実行できるようにしてください。
-
-### Quest が認識されない
-
-- USB ケーブルを確認
-- Quest の USB デバッグを許可する
-- `Check Connection` を実行してデバイス一覧を確認
-
-### 保存先フォルダに書き込めない
-
-- マウント先や SMB 共有がオンラインであることを確認
-- フォルダパスのアクセス権限を確認
-
-## Git で配布するための注意
-
-- ソースを配布する場合は、`scripts/` 以下を含めることで動作します。
-- バイナリ配布の場合は `dist/QuestVRCTool.exe` を配布先に添付してください。
-- `build/` や `dist/` は通常コミットしないため、必要に応じて `.gitignore` に追加してください。
-
-## ライセンス
-
-本プロジェクトは `LICENSE` に記載されたライセンスのもとで配布されます。
