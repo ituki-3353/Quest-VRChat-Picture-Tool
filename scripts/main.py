@@ -9,6 +9,11 @@ import locale
 import threading
 import queue
 import sys
+import re
+import urllib.parse
+import sqlite3
+import hashlib
+from datetime import datetime
 
 # 文字コード設定
 os.environ['PYTHONIOENCODING'] = 'utf-8'
@@ -70,6 +75,11 @@ def get_icon(name, size=16):
 DEFAULT_CONFIG = {
     "target_path": r"S:\VRChat-Picture",
     "rename_suffix": "_Quest",
+    "photo_naming_template": "{date}_{time}_{world}_{instance}",
+    "db_naming_template": "vrchat_logs_{date}_{time}",
+    "photo_db_path": "",
+    "local_log_path": "",
+    "import_logs_with_photos": True,
     "temp_path": os.path.join(os.environ.get('LOCALAPPDATA', os.path.expanduser('~')), 'QVPTool'),
     "adb_auto_start": True,
     "log_target_path": r"S:\VRChat-Logs",
@@ -114,6 +124,315 @@ def load_version():
     return "1.0.0", "unknown"
 
 
+def sanitize_filename(value, max_length=120):
+    """ファイル名に使える文字列に整形する"""
+    value = str(value or "").strip()
+    if not value:
+        return "Unknown"
+
+    replacements = {
+        '/': '／',
+        '\\': '＼',
+        ':': '：',
+        '*': '＊',
+        '?': '？',
+        '"': '”',
+        '<': '＜',
+        '>': '＞',
+        '|': '｜',
+    }
+    value = ''.join(replacements.get(ch, ch) for ch in value)
+    value = re.sub(r'\s+', '_', value)
+    value = re.sub(r'[_\-]{2,}', '_', value)
+    value = value.strip('_')
+    if len(value) > max_length:
+        return value[:max_length-3] + '...'
+    return value or "Unknown"
+
+
+def build_vrchat_world_url(world_name, instance):
+    """ワールド詳細ページまたは検索ページURLを生成する"""
+    world_id = None
+    if instance:
+        parts = instance.split(':', 1)
+        maybe_id = parts[0].strip()
+        if re.match(r'wrld_[0-9A-Za-z]+', maybe_id):
+            world_id = maybe_id
+        elif re.match(r'wrld_[0-9A-Za-z]+', instance):
+            world_id = instance
+    if not world_id and world_name:
+        match = re.search(r'(wrld_[0-9A-Za-z]+)', world_name)
+        if match:
+            world_id = match.group(1)
+
+    if world_id:
+        encoded_instance = urllib.parse.quote(instance or '', safe='')
+        return f"https://vrchat.com/home/launch?worldId={world_id}&instance={encoded_instance}"
+    if world_name:
+        encoded_world = urllib.parse.quote(world_name, safe='')
+        return f"https://vrchat.com/home/search?query={encoded_world}"
+    return ""
+
+
+def extract_screenshot_timestamp(filename):
+    """スクリーンショットファイル名から日付と時間を抽出する"""
+    match = re.search(
+        r'(?P<year>\d{4})[-_]?'
+        r'(?P<month>\d{2})[-_]?'
+        r'(?P<day>\d{2})[-_ ]?'
+        r'(?P<hour>\d{2})[-_:]'
+        r'(?P<minute>\d{2})[-_:]'
+        r'(?P<second>\d{2})',
+        filename,
+    )
+    if match:
+        return f"{match.group('year')}{match.group('month')}{match.group('day')}", f"{match.group('hour')}{match.group('minute')}{match.group('second')}"
+    return None, None
+
+
+def parse_vrchat_log_photo_locations(log_root):
+    """ログファイルから写真ファイル名と撮影場所を対応付ける"""
+    locations = {}
+    if not log_root or not os.path.exists(log_root):
+        return locations
+
+    world_patterns = [
+        re.compile(r'Entering Room: (?P<world>.+?) \((?P<instance>[^)]+)\)', re.I),
+        re.compile(r'Joined world "(?P<world>[^"]+)" \((?P<instance>[^)]+)\)', re.I),
+        re.compile(r'Loaded world "(?P<world>[^"]+)" \((?P<instance>[^)]+)\)', re.I),
+        re.compile(r'Joining instance (?P<world>[^()]+?) \((?P<instance>[^)]+)\)', re.I),
+        re.compile(r'Joined world (?P<world>[^()]+?) \((?P<instance>[^)]+)\)', re.I),
+    ]
+    screenshot_pattern = re.compile(
+        r'Captured screenshot at: .*?[\\/](?P<filename>[^\\/:*?"<>|\r\n]+\.png)',
+        re.I,
+    )
+    generic_png_pattern = re.compile(r'(?P<filename>[^\\/:*?"<>|\r\n]+\.png)', re.I)
+
+    current_world = None
+    current_instance = None
+
+    for root_dir, dirs, files in os.walk(log_root):
+        for file in files:
+            if not file.lower().endswith('.txt'):
+                continue
+            log_path = os.path.join(root_dir, file)
+            try:
+                with open(log_path, 'r', encoding='utf-8', errors='replace') as f:
+                    for line in f:
+                        for pattern in world_patterns:
+                            match = pattern.search(line)
+                            if match:
+                                current_world = match.group('world').strip()
+                                current_instance = match.group('instance').strip()
+                                break
+
+                        if 'captured screenshot at' in line.lower():
+                            match = screenshot_pattern.search(line)
+                            if match:
+                                filename = match.group('filename').strip()
+                            else:
+                                continue
+                        elif '.png' in line.lower():
+                            match = generic_png_pattern.search(line)
+                            if match:
+                                filename = match.group('filename').strip()
+                            else:
+                                continue
+                        else:
+                            continue
+
+                        base_name = os.path.splitext(filename)[0]
+                        if not base_name or base_name in locations:
+                            continue
+
+                        locations[base_name] = {
+                            'world_name': sanitize_filename(current_world or 'Unknown'),
+                            'instance_id': sanitize_filename(current_instance or 'Unknown'),
+                        }
+            except Exception:
+                continue
+
+    return locations
+
+
+def find_photo_location(filename, photo_locations, rename_suffix):
+    """元のスクリーンショット名がマッピングにあるか確認する"""
+    if filename in photo_locations:
+        return photo_locations[filename]
+    if rename_suffix and filename.endswith(rename_suffix):
+        original = filename[:-len(rename_suffix)]
+        if original in photo_locations:
+            return photo_locations[original]
+    return None
+
+
+def build_safe_photo_filename(date_part, time_part, world_name, instance_id, ext):
+    """撮影情報から安全なファイル名を作成する"""
+    world_part = sanitize_filename(world_name or 'Unknown', max_length=120)
+    instance_part = sanitize_filename(instance_id or 'Unknown', max_length=60)
+    base = f"{date_part}_{time_part}_{world_part}_{instance_part}"
+    allowed = 250 - len(ext)
+    if len(base) > allowed:
+        prefix = f"{date_part}_{time_part}_"
+        suffix = f"_{instance_part}"
+        remaining = allowed - len(prefix) - len(suffix) - 3
+        if remaining < 10:
+            remaining = max(10, allowed - len(prefix) - len(suffix) - 3)
+        world_part = (world_part[:remaining] + '...') if len(world_part) > remaining else world_part
+        base = f"{prefix}{world_part}{suffix}"
+    return f"{base}{ext}"
+
+
+def write_photo_index_file(destination_path, index_rows):
+    """加工した写真の目次ファイルを書き出す"""
+    if not os.path.exists(destination_path):
+        os.makedirs(destination_path, exist_ok=True)
+
+    index_path = os.path.join(destination_path, 'photo_index.txt')
+    try:
+        with open(index_path, 'w', encoding='utf-8') as f:
+            f.write('file_name,world_name,instance_url\n')
+            for row in index_rows:
+                f.write(f"{row['file_name']},{row['world_name']},{row['instance_url']}\n")
+        return index_path
+    except Exception:
+        return None
+
+
+def ensure_unique_filepath(filepath):
+    base, ext = os.path.splitext(filepath)
+    counter = 1
+    while os.path.exists(filepath):
+        filepath = f"{base}_{counter}{ext}"
+        counter += 1
+    return filepath
+
+
+def format_template_string(template, data):
+    """テンプレートから安全なファイル名文字列を構築する"""
+    try:
+        formatted = template.format(
+            date=data.get('date', 'unknown'),
+            time=data.get('time', 'unknown'),
+            world=data.get('world', 'Unknown'),
+            instance=data.get('instance', 'Unknown'),
+            original=data.get('original', 'Unknown'),
+            ext=data.get('ext', ''),
+        )
+    except Exception:
+        formatted = template
+
+    return sanitize_filename(formatted, max_length=255)
+
+
+def build_db_path(base_dir, template, data):
+    filename_base = format_template_string(template, data)
+    if not filename_base.lower().endswith('.db'):
+        filename_base += '.db'
+    db_path = os.path.join(base_dir, filename_base)
+    return ensure_unique_filepath(db_path)
+
+
+def create_or_update_log_db(db_path, log_directory):
+    """ログファイルを SQLite DB にインポート・追記する"""
+    if not os.path.exists(log_directory):
+        return False
+
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    conn = sqlite3.connect(db_path)
+    try:
+        with conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS imported_logs ("
+                "id INTEGER PRIMARY KEY, "
+                "log_name TEXT, "
+                "log_path TEXT UNIQUE, "
+                "imported_at TEXT, "
+                "content TEXT"
+                ")"
+            )
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS photo_locations ("
+                "id INTEGER PRIMARY KEY, "
+                "screenshot_name TEXT UNIQUE, "
+                "world_name TEXT, "
+                "instance_id TEXT, "
+                "log_path TEXT, "
+                "imported_at TEXT"
+                ")"
+            )
+
+            for root_dir, dirs, files in os.walk(log_directory):
+                for file in files:
+                    if not file.lower().endswith('.txt'):
+                        continue
+                    log_path = os.path.join(root_dir, file)
+                    try:
+                        with open(log_path, 'r', encoding='utf-8', errors='replace') as f:
+                            content = f.read()
+                        imported_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        conn.execute(
+                            "INSERT OR IGNORE INTO imported_logs (log_name, log_path, imported_at, content) VALUES (?, ?, ?, ?)",
+                            (file, os.path.relpath(log_path, log_directory), imported_at, content),
+                        )
+                    except Exception:
+                        continue
+
+            # ログファイルからスクリーンショットの位置情報を抽出してDB化
+            try:
+                locations = parse_vrchat_log_photo_locations(log_directory)
+                for screenshot_name, data in locations.items():
+                    conn.execute(
+                        "INSERT OR REPLACE INTO photo_locations (screenshot_name, world_name, instance_id, log_path, imported_at) VALUES (?, ?, ?, ?, ?)",
+                        (screenshot_name, data.get('world_name', 'Unknown'), data.get('instance_id', 'Unknown'), '', datetime.now().strftime('%Y-%m-%d %H:%M:%S')),
+                    )
+            except Exception:
+                pass
+        return True
+    finally:
+        conn.close()
+
+
+def find_latest_log_db(folder_path):
+    if not folder_path or not os.path.isdir(folder_path):
+        return None
+    db_files = [
+        os.path.join(folder_path, f)
+        for f in os.listdir(folder_path)
+        if f.lower().endswith('.db')
+    ]
+    if not db_files:
+        return None
+    return max(db_files, key=os.path.getmtime)
+
+
+def load_photo_locations_from_db(db_path):
+    locations = {}
+    if not db_path or not os.path.exists(db_path):
+        return locations
+    try:
+        conn = sqlite3.connect(db_path)
+        with conn:
+            rows = conn.execute(
+                "SELECT screenshot_name, world_name, instance_id FROM photo_locations"
+            ).fetchall()
+            for screenshot_name, world_name, instance_id in rows:
+                key = os.path.splitext(screenshot_name)[0]
+                locations[key] = {
+                    'world_name': world_name or 'Unknown',
+                    'instance_id': instance_id or 'Unknown',
+                }
+    except Exception:
+        pass
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    return locations
+
+
 def load_logo():
     """タイトルロゴ画像を読み込む"""
     if os.path.exists(LOGO_FILE):
@@ -153,11 +472,73 @@ def browse_log_folder():
         log_target_path_var.set(folder)
         save_settings()
 
+
+def browse_local_log_folder():
+    """Windows上のログフォルダを選択する"""
+    current_path = local_log_path_var.get()
+    folder = filedialog.askdirectory(
+        title="Windowsログフォルダを選択",
+        initialdir=current_path if os.path.exists(current_path) else os.path.expanduser("~")
+    )
+    if folder:
+        local_log_path_var.set(folder)
+        save_settings()
+
+
+def browse_photo_db_file():
+    """写真インポート用DBファイルを選択する"""
+    current_path = photo_db_path_var.get()
+    initial_dir = os.path.dirname(current_path) if current_path and os.path.exists(os.path.dirname(current_path)) else os.path.expanduser("~")
+    filename = filedialog.askopenfilename(
+        title="DBファイルを選択",
+        initialdir=initial_dir,
+        filetypes=[("SQLite DB", "*.db"), ("すべてのファイル", "*.*")],
+    )
+    if filename:
+        photo_db_path_var.set(filename)
+        photo_db_content_var.set("DB内容: 選択済み - 確認ボタンを押してください")
+        save_settings()
+
+
+def inspect_photo_db_content():
+    """選択されたDBの内容を確認する"""
+    db_path = photo_db_path_var.get().strip()
+    if not db_path or not os.path.exists(db_path):
+        messagebox.showwarning("DB内容確認", "有効なDBファイルを選択してください。")
+        return
+
+    try:
+        conn = sqlite3.connect(db_path)
+        with conn:
+            tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            photo_count = 0
+            log_count = 0
+            sample_rows = []
+
+            if "photo_locations" in tables:
+                photo_count = conn.execute("SELECT COUNT(*) FROM photo_locations").fetchone()[0]
+                sample_rows = [row[0] for row in conn.execute("SELECT screenshot_name FROM photo_locations LIMIT 5").fetchall()]
+            if "imported_logs" in tables:
+                log_count = conn.execute("SELECT COUNT(*) FROM imported_logs").fetchone()[0]
+
+        sample_text = "" if not sample_rows else "\n例: " + ", ".join(sample_rows)
+        summary = f"DB内容: {os.path.basename(db_path)} | photo_locations: {photo_count}件 | imported_logs: {log_count}件{sample_text}"
+        photo_db_content_var.set(summary)
+        messagebox.showinfo("DB内容確認", summary)
+    except Exception as e:
+        messagebox.showerror("DB内容確認", f"DBを読み込めませんでした:\n{e}")
+
+
 def save_settings():
     """設定タブの入力値をconfig.jsonに保存"""
     config = {
         "target_path": target_path_var.get(),
         "rename_suffix": rename_suffix_var.get(),
+        "photo_naming_template": photo_naming_template_var.get(),
+        "db_naming_template": db_naming_template_var.get(),
+        "photo_db_path": photo_db_path_var.get(),
+        "local_log_path": local_log_path_var.get(),
+        "import_logs_with_photos": import_logs_with_photos_var.get(),
         "temp_path": temp_path_var.get(),
         "adb_auto_start": adb_auto_start_var.get(),
         "log_target_path": log_target_path_var.get(),
@@ -172,8 +553,13 @@ def reset_settings():
     if messagebox.askyesno("確認", "設定をデフォルト値にリセットしますか？"):
         target_path_var.set(DEFAULT_CONFIG["target_path"])
         rename_suffix_var.set(DEFAULT_CONFIG["rename_suffix"])
+        photo_naming_template_var.set(DEFAULT_CONFIG["photo_naming_template"])
+        db_naming_template_var.set(DEFAULT_CONFIG["db_naming_template"])
+        import_logs_with_photos_var.set(DEFAULT_CONFIG["import_logs_with_photos"])
         temp_path_var.set(DEFAULT_CONFIG["temp_path"])
         adb_auto_start_var.set(DEFAULT_CONFIG["adb_auto_start"])
+        photo_db_path_var.set(DEFAULT_CONFIG["photo_db_path"])
+        local_log_path_var.set(DEFAULT_CONFIG["local_log_path"])
         log_target_path_var.set(DEFAULT_CONFIG["log_target_path"])
         log_source_path_var.set(DEFAULT_CONFIG["log_source_path"])
         save_settings()
@@ -185,8 +571,12 @@ def load_default_settings():
         # デフォルト設定をGUIに反映
         target_path_var.set(DEFAULT_CONFIG["target_path"])
         rename_suffix_var.set(DEFAULT_CONFIG["rename_suffix"])
+        photo_naming_template_var.set(DEFAULT_CONFIG["photo_naming_template"])
+        db_naming_template_var.set(DEFAULT_CONFIG["db_naming_template"])
+        import_logs_with_photos_var.set(DEFAULT_CONFIG["import_logs_with_photos"])
         temp_path_var.set(DEFAULT_CONFIG["temp_path"])
         adb_auto_start_var.set(DEFAULT_CONFIG["adb_auto_start"])
+        photo_db_path_var.set(DEFAULT_CONFIG["photo_db_path"])
         log_target_path_var.set(DEFAULT_CONFIG["log_target_path"])
         log_source_path_var.set(DEFAULT_CONFIG["log_source_path"])
         
@@ -194,6 +584,11 @@ def load_default_settings():
         config = {
             "target_path": target_path_var.get(),
             "rename_suffix": rename_suffix_var.get(),
+            "photo_naming_template": photo_naming_template_var.get(),
+            "db_naming_template": db_naming_template_var.get(),
+            "photo_db_path": photo_db_path_var.get(),
+            "local_log_path": local_log_path_var.get(),
+            "import_logs_with_photos": import_logs_with_photos_var.get(),
             "temp_path": temp_path_var.get(),
             "adb_auto_start": adb_auto_start_var.get(),
             "log_target_path": log_target_path_var.get(),
@@ -213,6 +608,11 @@ def load_default_settings():
         default_config = {
             "target_path": DEFAULT_CONFIG["target_path"],
             "rename_suffix": DEFAULT_CONFIG["rename_suffix"],
+            "photo_naming_template": DEFAULT_CONFIG["photo_naming_template"],
+            "db_naming_template": DEFAULT_CONFIG["db_naming_template"],
+            "photo_db_path": DEFAULT_CONFIG["photo_db_path"],
+            "local_log_path": DEFAULT_CONFIG["local_log_path"],
+            "import_logs_with_photos": DEFAULT_CONFIG["import_logs_with_photos"],
             "temp_path": DEFAULT_CONFIG["temp_path"],
             "adb_auto_start": DEFAULT_CONFIG["adb_auto_start"],
             "log_target_path": DEFAULT_CONFIG["log_target_path"],
@@ -353,7 +753,44 @@ def _run_import_worker():
                 return
             import_queue.put(("log", "-" * 50))
             import_queue.put(("log", "✓ ファイル転送完了"))
-            
+
+            # DB形式のログがあれば優先利用する
+            photo_locations = {}
+            selected_db = photo_db_path_var.get().strip()
+            if selected_db and os.path.exists(selected_db):
+                import_queue.put(("log", f"✓ 選択DBをロード中: {selected_db}"))
+                photo_locations = load_photo_locations_from_db(selected_db)
+                if photo_locations:
+                    import_queue.put(("log", f"✓ DBから位置情報を取得しました: {len(photo_locations)}件"))
+                else:
+                    import_queue.put(("warning", "選択DBから位置情報が読み取れませんでした。ログ解析にフォールバックします。"))
+
+            if not photo_locations and local_log_path_var.get().strip():
+                local_log_path = local_log_path_var.get().strip()
+                if os.path.exists(local_log_path):
+                    import_queue.put(("log", f"✓ Windowsログを参照中: {local_log_path}"))
+                    photo_locations = parse_vrchat_log_photo_locations(local_log_path)
+                    if photo_locations:
+                        import_queue.put(("log", f"✓ Windowsログから写真の撮影場所を取得しました: {len(photo_locations)}件"))
+                    else:
+                        import_queue.put(("warning", "Windowsログから位置情報が取得できませんでした。既存ログを解析します。"))
+
+            if not photo_locations and import_logs_with_photos_var.get():
+                db_path = find_latest_log_db(log_target_path_var.get())
+                if db_path:
+                    import_queue.put(("log", f"✓ 最新DBを検出しました: {db_path}"))
+                    photo_locations = load_photo_locations_from_db(db_path)
+                    if photo_locations:
+                        import_queue.put(("log", f"✓ 最新DBから位置情報を取得しました: {len(photo_locations)}件"))
+                    else:
+                        import_queue.put(("warning", "最新DBから位置情報の取得に失敗しました。ログファイルを解析します。"))
+
+            if not photo_locations and import_logs_with_photos_var.get():
+                photo_locations = parse_vrchat_log_photo_locations(log_target_path_var.get())
+                if photo_locations:
+                    import_queue.put(("log", f"✓ ログから写真の撮影場所を取得しました: {len(photo_locations)}件"))
+                else:
+                    import_queue.put(("log", "⚠ ログから写真の撮影場所を取得できませんでした。既存のリネーム方式を使用します。"))
         except subprocess.TimeoutExpired:
             process.kill()
             import_queue.put(("log", "✗ ファイル転送がタイムアウト"))
@@ -372,32 +809,72 @@ def _run_import_worker():
             import shutil
             renamed_count = 0
             moved_count = 0
+            photo_index_rows = []
 
             if os.path.exists(vrhcat_temp_dir):
                 import_queue.put(("log", f"📂 一時フォルダー: {vrhcat_temp_dir}"))
 
                 # ステップ1: 一時フォルダー内でリネーム
                 import_queue.put(("log", "\n[処理] ステップ 1/2: ファイルをリネーム中..."))
-                
                 for root_dir, dirs, files in os.walk(vrhcat_temp_dir):
                     for file in files:
                         filepath = os.path.join(root_dir, file)
                         filename, ext = os.path.splitext(file)
+                        new_filename = None
+                        final_filename = file
+                        world_name = 'Unknown'
+                        instance_id = 'Unknown'
+                        instance_url = ''
 
-                        # 既にリネーム済みかチェック
-                        if not filename.endswith(rename_suffix):
-                            new_filename = filename + rename_suffix + ext
+                        if ext.lower() == ".png":
+                            photo_location = find_photo_location(filename, photo_locations, rename_suffix)
+                            if photo_location:
+                                world_name = photo_location['world_name']
+                                instance_id = photo_location['instance_id']
+                                date_part, time_part = extract_screenshot_timestamp(filename)
+                                if date_part and time_part:
+                                    new_filename = build_safe_photo_filename(date_part, time_part, world_name, instance_id, ext)
+                                else:
+                                    safe_world = sanitize_filename(world_name, max_length=100)
+                                    safe_instance = sanitize_filename(instance_id, max_length=60)
+                                    new_filename = f"{safe_world}_{safe_instance}{ext}"
+                            elif not filename.endswith(rename_suffix):
+                                new_filename = filename + rename_suffix + ext
+
+                            instance_url = build_vrchat_world_url(world_name if world_name != 'Unknown' else None, instance_id if instance_id != 'Unknown' else None)
+
+                        if new_filename:
                             new_filepath = os.path.join(root_dir, new_filename)
-
+                            if os.path.exists(new_filepath):
+                                new_filepath = ensure_unique_filepath(new_filepath)
                             try:
                                 os.rename(filepath, new_filepath)
+                                final_filename = os.path.basename(new_filepath)
                                 renamed_count += 1
                                 if renamed_count % 10 == 0 or renamed_count <= 3:
-                                    import_queue.put(("log", f"  ✓ リネーム: {file} → {new_filename}"))
+                                    import_queue.put(("log", f"  ✓ リネーム: {file} → {final_filename}"))
                             except Exception as e:
                                 import_queue.put(("log", f"  ✗ リネーム失敗: {file} - {e}"))
 
+                        if ext.lower() == ".png":
+                            rel_dir = os.path.relpath(root_dir, vrhcat_temp_dir)
+                            if rel_dir == '.' or rel_dir == os.curdir:
+                                rel_path = final_filename
+                            else:
+                                rel_path = os.path.normpath(os.path.join(rel_dir, final_filename))
+                            photo_index_rows.append({
+                                'file_name': rel_path.replace(os.sep, '/'),
+                                'world_name': world_name,
+                                'instance_url': instance_url,
+                            })
+
                 import_queue.put(("log", f"✓ リネーム完了: {renamed_count}個のファイル"))
+
+                index_path = write_photo_index_file(vrhcat_final_dir, photo_index_rows)
+                if index_path:
+                    import_queue.put(("log", f"✓ 思い出のインデックスを生成しました: {index_path}"))
+                else:
+                    import_queue.put(("log", "⚠ 思い出のインデックスの生成に失敗しました。"))
 
                 # ステップ2: 最終フォルダーへ移動
                 import_queue.put(("log", "\n[処理] ステップ 2/2: ファイルを最終フォルダーへ移動中..."))
@@ -428,6 +905,20 @@ def _run_import_worker():
 
                 import_queue.put(("log", "-" * 50))
                 import_queue.put(("success", f"✓ インポート完了！\n\n処理結果:\n  • リネーム: {renamed_count}個\n  • 移動: {moved_count}個\n\n最終保存先:\n{vrhcat_final_dir}"))
+
+                if photo_index_rows:
+                    world_names = [row['world_name'] for row in photo_index_rows if row['world_name'] != 'Unknown']
+                    world_summary = ', '.join(sorted(set(world_names))) if world_names else 'Unknown'
+                    preview_path = None
+                    first_row_path = photo_index_rows[0]['file_name'].replace('/', os.sep)
+                    candidate_preview = os.path.join(vrhcat_final_dir, first_row_path)
+                    if os.path.exists(candidate_preview):
+                        preview_path = candidate_preview
+                    import_queue.put((
+                        "preview",
+                        f"インポート完了！\n\n保存した写真: {moved_count}枚\n代表ワールド: {world_summary}\n保存先: {vrhcat_final_dir}",
+                        preview_path,
+                    ))
             else:
                 import_queue.put(("log", "⚠ 処理するファイルが見つかりませんでした。"))
                 import_queue.put(("info", "処理するファイルが見つかりませんでした。"))
@@ -571,6 +1062,97 @@ def run_log_import():
     status_var.set("⏱ ログ取得中...")
     import_thread = threading.Thread(target=_run_log_import_worker, daemon=True)
     import_thread.start()
+
+
+def _run_db_import_worker():
+    """VRChat ログを SQLite DB 形式でインポート（別スレッド）"""
+    target_path = log_target_path_var.get()
+    source_path = log_source_path_var.get()
+    temp_path = os.path.join(temp_path_var.get(), "Logs_DB_Temp")
+
+    if not target_path.strip():
+        import_queue.put(("error", "ログ保存先フォルダを指定してください。"))
+        return
+
+    try:
+        import_queue.put(("log", "\n" + "="*50))
+        import_queue.put(("log", "  VRChat ログDBインポートツール"))
+        import_queue.put(("log", "="*50))
+        import_queue.put(("status", "ADB環境を確認中..."))
+
+        try:
+            subprocess.run(["adb", "start-server"], capture_output=True, check=True, timeout=20, encoding='utf-8')
+            result = subprocess.run(["adb", "devices"], capture_output=True, text=True, encoding='utf-8')
+            if "device" not in result.stdout or "unauthorized" in result.stdout:
+                import_queue.put(("error", "Questが接続されていません。"))
+                return
+        except Exception as e:
+            import_queue.put(("error", f"ADBエラー: {e}"))
+            return
+
+        os.makedirs(target_path, exist_ok=True)
+        if os.path.exists(temp_path):
+            import shutil
+            shutil.rmtree(temp_path)
+        os.makedirs(temp_path, exist_ok=True)
+
+        import_queue.put(("log", f"[1/2] ログ転送中...\n ソース: {source_path}"))
+        import_queue.put(("status", "ログ転送中..."))
+
+        process = subprocess.Popen(
+            ["adb", "pull", source_path, temp_path],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8'
+        )
+        process.wait(timeout=120)
+
+        if process.returncode != 0:
+            import_queue.put(("log", "⚠ 転送に失敗したか、ファイルが見つかりません。"))
+            import_queue.put(("info", "Quest側にログファイルが見つかりませんでした。"))
+            return
+
+        import_queue.put(("log", "[2/2] DB形式へ変換中..."))
+        import_queue.put(("status", "DB形式に変換中..."))
+
+        pulled_logs_dir = temp_path
+        if os.path.exists(os.path.join(temp_path, "Logs")):
+            pulled_logs_dir = os.path.join(temp_path, "Logs")
+
+        now = datetime.now()
+        db_path = build_db_path(target_path, db_naming_template_var.get(), {
+            'date': now.strftime('%Y%m%d'),
+            'time': now.strftime('%H%M%S'),
+        })
+
+        if create_or_update_log_db(db_path, pulled_logs_dir):
+            import_queue.put(("log", f"✓ DBを作成しました: {db_path}"))
+            import_queue.put(("success", f"DBインポートが完了しました。\n保存先: {db_path}"))
+        else:
+            import_queue.put(("error", "DBの作成に失敗しました。"))
+            return
+
+        try:
+            import shutil
+            shutil.rmtree(temp_path)
+        except Exception:
+            pass
+
+        import_queue.put(("done", "completed"))
+
+    except Exception as e:
+        import_queue.put(("log", f"✗ エラー: {e}"))
+        import_queue.put(("error", f"ログDB処理中にエラーが発生しました:\n{e}"))
+
+
+def run_db_import():
+    """DB形式ログインポート実行（スレッド起動）"""
+    global import_thread
+    if import_thread and import_thread.is_alive():
+        messagebox.showwarning("警告", "既に処理中です。完了するまでお待ちください。")
+        return
+    status_var.set("⏱ DBインポート中...")
+    import_thread = threading.Thread(target=_run_db_import_worker, daemon=True)
+    import_thread.start()
+
 
 def run_config():
     """接続状況を確認（Python実装）"""
@@ -813,10 +1395,43 @@ class LogWindow:
         self.top.geometry(f"600x350+{main_x + main_w + 10}+{main_y}")
         
         self.top.deiconify()
-        self.top.lift()
-        
+
     def hide(self):
         self.top.withdraw()
+
+
+def show_import_preview(summary_text, preview_path=None):
+    """インポート完了後にサマリーと代表写真を表示する"""
+    preview_win = tk.Toplevel(root)
+    preview_win.title("完了レポート")
+    preview_win.geometry("640x520")
+    preview_win.resizable(True, True)
+
+    frame = ttk.Frame(preview_win, padding=12)
+    frame.pack(fill=tk.BOTH, expand=True)
+
+    ttk.Label(frame, text="インポート完了レポート", font=("Arial", 14, "bold")).pack(anchor=tk.W)
+    ttk.Label(frame, text=summary_text, justify=tk.LEFT, wraplength=600).pack(anchor=tk.W, pady=(8, 10))
+
+    if preview_path and os.path.exists(preview_path):
+        try:
+            preview_image = tk.PhotoImage(file=preview_path)
+            width = preview_image.width()
+            height = preview_image.height()
+            if width > 600 or height > 340:
+                factor = max(1, max(width // 600, height // 340))
+                preview_image = preview_image.subsample(factor, factor)
+            preview_label = ttk.Label(frame, image=preview_image)
+            preview_label.image = preview_image
+            preview_label.pack(pady=(0, 8))
+        except Exception as e:
+            ttk.Label(frame, text=f"プレビュー画像の表示に失敗しました: {e}", foreground="red").pack(anchor=tk.W, pady=(0, 8))
+    else:
+        ttk.Label(frame, text="プレビュー画像は利用できませんでした。", foreground="gray").pack(anchor=tk.W, pady=(0, 8))
+
+    if preview_path:
+        ttk.Label(frame, text=f"代表画像: {os.path.basename(preview_path)}", font=("Arial", 9, "italic"), foreground="gray").pack(anchor=tk.W)
+    ttk.Button(frame, text="閉じる", command=preview_win.destroy).pack(pady=(10, 0))
 
 
 # メインウィンドウ
@@ -839,10 +1454,16 @@ root.resizable(True, True)
 config = load_config()
 target_path_var = tk.StringVar(value=config.get("target_path", DEFAULT_CONFIG["target_path"]))
 rename_suffix_var = tk.StringVar(value=config.get("rename_suffix", DEFAULT_CONFIG["rename_suffix"]))
+photo_naming_template_var = tk.StringVar(value=config.get("photo_naming_template", DEFAULT_CONFIG["photo_naming_template"]))
+db_naming_template_var = tk.StringVar(value=config.get("db_naming_template", DEFAULT_CONFIG["db_naming_template"]))
+photo_db_path_var = tk.StringVar(value=config.get("photo_db_path", DEFAULT_CONFIG["photo_db_path"]))
+local_log_path_var = tk.StringVar(value=config.get("local_log_path", DEFAULT_CONFIG["local_log_path"]))
+import_logs_with_photos_var = tk.BooleanVar(value=config.get("import_logs_with_photos", DEFAULT_CONFIG["import_logs_with_photos"]))
 temp_path_var = tk.StringVar(value=config.get("temp_path", DEFAULT_CONFIG["temp_path"]))
 adb_auto_start_var = tk.BooleanVar(value=config.get("adb_auto_start", DEFAULT_CONFIG["adb_auto_start"]))
 log_target_path_var = tk.StringVar(value=config.get("log_target_path", DEFAULT_CONFIG["log_target_path"]))
 log_source_path_var = tk.StringVar(value=config.get("log_source_path", DEFAULT_CONFIG["log_source_path"]))
+photo_db_content_var = tk.StringVar(value="DB内容: 未選択")
 status_var = tk.StringVar(value=STR.get("status_waiting", "待機中..."))
 
 def load_help_text():
@@ -913,6 +1534,7 @@ sidebar_items_data = [
     ("welcome_item", STR.get("sidebar", {}).get("welcome", " Welcome"), "pics"),
     ("pics_item", STR.get("sidebar", {}).get("pics", " Pictures"), "pics"),
     ("logs_item", STR.get("sidebar", {}).get("logs", " Logs"), "logs"),
+    ("db_item", STR.get("sidebar", {}).get("db", " DB Management"), "logs"),
     ("settings_item", STR.get("sidebar", {}).get("settings", " Settings"), "settings"),
     ("help_item", STR.get("sidebar", {}).get("help", " Help"), "help"),
 ]
@@ -997,6 +1619,13 @@ ttk.Entry(p_rename_frame, textvariable=rename_suffix_var).pack(anchor=tk.W, padx
 p_rename_example = ttk.Label(p_rename_frame, text=STR.get("view_pics", {}).get("rename_example", ""), foreground="gray")
 p_rename_example.pack(anchor=tk.W, padx=5, fill=tk.X)
 
+p_db_frame = ttk.LabelFrame(v_pics, text="DBファイル選択", padding=10)
+p_db_frame.pack(fill=tk.X, pady=5)
+ttk.Entry(p_db_frame, textvariable=photo_db_path_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+ttk.Button(p_db_frame, text="参照", command=browse_photo_db_file).pack(side=tk.LEFT)
+ttk.Button(p_db_frame, text="DB内容確認", command=inspect_photo_db_content).pack(side=tk.LEFT, padx=(5, 0))
+ttk.Label(p_db_frame, textvariable=photo_db_content_var, foreground="gray", wraplength=560).pack(anchor=tk.W, pady=(6, 0), fill=tk.X)
+
 def _on_pics_resize(event):
     new_wrap = event.width - 40
     if new_wrap > 0:
@@ -1017,9 +1646,37 @@ ttk.Button(l_target_frame, text=STR.get("view_pics", {}).get("browse", "Browse")
 l_source_frame = ttk.LabelFrame(v_logs, text=STR.get("view_logs", {}).get("source_label", " Quest Source"), padding=10)
 l_source_frame.pack(fill=tk.X, pady=5)
 ttk.Entry(l_source_frame, textvariable=log_source_path_var, state="readonly").pack(fill=tk.X, padx=5)
-ttk.Button(v_logs, text=STR.get("view_logs", {}).get("import_btn", " Import & Merge"), command=run_log_import, width=30, image=logs_icon_24, compound=tk.LEFT).pack(pady=20)
+log_button_frame = ttk.Frame(v_logs)
+log_button_frame.pack(pady=20, fill=tk.X)
+ttk.Button(log_button_frame, text=STR.get("view_logs", {}).get("import_btn", " Import & Merge"), command=run_log_import, width=20, image=logs_icon_24, compound=tk.LEFT).pack(side=tk.LEFT, padx=(0, 10))
+ttk.Button(log_button_frame, text=STR.get("view_logs", {}).get("db_import_btn", " Import to DB"), command=run_db_import, width=20, image=logs_icon_24, compound=tk.LEFT).pack(side=tk.LEFT)
 
-# -- View 2: Settings --
+# -- View 2: DB Management --
+v_db = ttk.Frame(content_area)
+view_frames["db"] = v_db
+db_icon_24 = get_icon("logs", 24)
+ttk.Label(v_db, text="DB管理", font=("Arial", 14, "bold"), image=db_icon_24, compound=tk.LEFT).pack(anchor=tk.W, pady=10)
+
+b_db_file_frame = ttk.LabelFrame(v_db, text="DBファイル", padding=10)
+b_db_file_frame.pack(fill=tk.X, pady=5)
+ttk.Entry(b_db_file_frame, textvariable=photo_db_path_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+ttk.Button(b_db_file_frame, text="参照", command=browse_photo_db_file).pack(side=tk.LEFT)
+ttk.Button(b_db_file_frame, text="DB内容確認", command=inspect_photo_db_content).pack(side=tk.LEFT, padx=(5, 0))
+ttk.Label(b_db_file_frame, textvariable=photo_db_content_var, foreground="gray", wraplength=560).pack(anchor=tk.W, pady=(6, 0), fill=tk.X)
+
+b_local_log_frame = ttk.LabelFrame(v_db, text="Windows ログフォルダ", padding=10)
+b_local_log_frame.pack(fill=tk.X, pady=5)
+ttk.Entry(b_local_log_frame, textvariable=local_log_path_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+ttk.Button(b_local_log_frame, text="参照", command=browse_local_log_folder).pack(side=tk.LEFT)
+
+b_db_action_frame = ttk.Frame(v_db, padding=10)
+b_db_action_frame.pack(fill=tk.X, pady=5)
+ttk.Button(b_db_action_frame, text="WindowsログをDBに変換", command=run_db_import, width=30).pack(side=tk.LEFT, padx=(0, 5))
+
+b_db_summary = ttk.Label(v_db, textvariable=photo_db_content_var, foreground="gray", wraplength=560)
+b_db_summary.pack(anchor=tk.W, pady=(10, 0), fill=tk.X)
+
+# -- View 3: Settings --
 v_settings = ttk.Frame(content_area)
 view_frames["settings"] = v_settings
 settings_icon_24 = get_icon("settings", 24)
@@ -1027,11 +1684,25 @@ ttk.Label(v_settings, text=STR.get("view_settings", {}).get("header", " Global S
 s_temp_frame = ttk.LabelFrame(v_settings, text=STR.get("view_settings", {}).get("temp_label", " Temp Directory"), padding=10)
 s_temp_frame.pack(fill=tk.X, pady=5)
 ttk.Entry(s_temp_frame, textvariable=temp_path_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+
+s_naming_frame = ttk.LabelFrame(v_settings, text=STR.get("view_settings", {}).get("naming_label", " Naming Templates"), padding=10)
+s_naming_frame.pack(fill=tk.X, pady=5)
+ttk.Label(s_naming_frame, text="写真命名テンプレート:").pack(anchor=tk.W)
+ttk.Entry(s_naming_frame, textvariable=photo_naming_template_var).pack(fill=tk.X, padx=5, pady=(0, 5))
+ttk.Label(s_naming_frame, text="DB命名テンプレート:").pack(anchor=tk.W)
+ttk.Entry(s_naming_frame, textvariable=db_naming_template_var).pack(fill=tk.X, padx=5)
+ttk.Label(s_naming_frame, text="使用可能なプレースホルダ: {date}, {time}, {world}, {instance}, {original}, {ext}", foreground="gray").pack(anchor=tk.W, pady=(4, 0))
+
+s_log_frame = ttk.LabelFrame(v_settings, text=STR.get("view_settings", {}).get("log_import_label", " Log Import"), padding=10)
+s_log_frame.pack(fill=tk.X, pady=5)
+ttk.Checkbutton(s_log_frame, text=STR.get("view_settings", {}).get("import_logs_with_photos", "Import logs together with photos"), variable=import_logs_with_photos_var).pack(anchor=tk.W)
+
 s_adb_frame = ttk.LabelFrame(v_settings, text=STR.get("view_settings", {}).get("adb_label", " ADB Settings"), padding=10)
 s_adb_frame.pack(fill=tk.X, pady=5)
 ttk.Checkbutton(s_adb_frame, text=STR.get("view_settings", {}).get("adb_auto_start", ""), variable=adb_auto_start_var).pack(anchor=tk.W)
 ttk.Button(s_adb_frame, text=STR.get("view_settings", {}).get("adb_test", ""), command=run_config).pack(anchor=tk.W, pady=5)
 ttk.Button(s_adb_frame, text=STR.get("view_settings", {}).get("diag", ""), command=run_test).pack(anchor=tk.W)
+
 s_btn_frame = ttk.Frame(v_settings, padding=10)
 s_btn_frame.pack(fill=tk.X, pady=20)
 ttk.Button(s_btn_frame, text=STR.get("view_settings", {}).get("save", " Save"), command=save_settings, image=get_icon("save", 16), compound=tk.LEFT).pack(side=tk.LEFT, padx=5)
@@ -1092,6 +1763,10 @@ def process_queue():
                 import_queue.put(("log", msg_data[0]))  # ログにも記録
                 messagebox.showinfo("成功", msg_data[0])
                 status_var.set(f"✓ 完了")
+                
+            elif msg_type == "preview":
+                preview_text, preview_path = msg_data
+                show_import_preview(preview_text, preview_path)
                 
             elif msg_type == "done":
                 # 処理完了

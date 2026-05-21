@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Quest VRChat Tool - 機能紹介</title>
+  <style>
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f6f8fb; color: #24292f; }
+    .wrapper { max-width: 960px; margin: 0 auto; padding: 32px 20px; }
+    header { text-align: center; padding: 24px 0; }
+    header h1 { margin: 0; font-size: 2.8rem; letter-spacing: -0.03em; }
+    header p { margin: 12px auto 0; max-width: 720px; color: #57606a; font-size: 1.05rem; line-height: 1.8; }
+    .badge { display: inline-flex; padding: 6px 12px; border-radius: 999px; background: #0366d6; color: #fff; font-size: 0.95rem; font-weight: 600; letter-spacing: 0.02em; }
+    section { margin-top: 40px; }
+    section h2 { font-size: 1.7rem; margin-bottom: 18px; border-bottom: 2px solid #dde1e8; padding-bottom: 10px; }
+    .grid { display: grid; gap: 20px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+    .card { padding: 24px; background: #fff; border: 1px solid #e1e4e8; border-radius: 16px; box-shadow: 0 8px 24px rgba(149, 157, 165, 0.08); }
+    .card h3 { margin-top: 0; font-size: 1.2rem; }
+    .card p { margin: 10px 0 0; color: #57606a; line-height: 1.75; }
+    ul { padding-left: 1.3rem; color: #424a53; line-height: 1.75; }
+    .note { margin-top: 16px; padding: 18px; background: #eff6ff; border-left: 4px solid #2f80ed; border-radius: 10px; color: #1e3a8a; }
+    .button { display: inline-block; margin-top: 18px; padding: 12px 20px; border-radius: 999px; background: #0366d6; color: #fff; text-decoration: none; font-weight: 700; }
+    footer { text-align: center; margin: 48px 0 24px; color: #7a869a; font-size: 0.95rem; }
+    @media (max-width: 640px) { header h1 { font-size: 2.1rem; } }
+  </style>
+</head>
+<body>
+  <div class="wrapper">
+    <header>
+      <span class="badge">Quest VRChat Tool</span>
+      <h1>WindowsでQuestの写真・ログをかんたん転送</h1>
+      <p>Meta Quest と Windows をつなぎ、VRChat の写真ファイルやログをPCへインポート・保存・管理するための専用ツールです。操作は3ステップで完了します。</p>
+    </header>
+
+    <section>
+      <h2>対応機能</h2>
+      <div class="grid">
+        <div class="card">
+          <h3>VRChat 写真のインポート</h3>
+          <p>Quest内のVRChat写真をPCに転送し、分かりやすい名前で保存します。オフラインでも画像を確認できます。</p>
+        </div>
+        <div class="card">
+          <h3>ログの取得とマージ</h3>
+          <p>Quest内のVRChatログを取り出し、既存のPCログへ追記（マージ）します。デバッグ情報の調査や保存に便利です。</p>
+        </div>
+        <div class="card">
+          <h3>ADB接続の確認</h3>
+          <p>Questの接続状態をチェックし、USBデバッグが正常に有効になっているか確認します。接続トラブル時の原因特定に役立ちます。</p>
+        </div>
+        <div class="card">
+          <h3>保存先と設定の管理</h3>
+          <p>保存先フォルダーを指定し、設定をファイルに保存できます。次回起動時も同じ設定を使い続けられます。</p>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>操作の流れ</h2>
+      <ul>
+        <li>1. QuestをPCにUSBケーブルで接続し、Quest側でUSBデバッグを許可</li>
+        <li>2. 保存先フォルダーを指定して、インポート対象を選択</li>
+        <li>3. 「写真をインポート」または「ログをインポート＆マージ」を実行</li>
+      </ul>
+      <div class="note">
+        <strong>ポイント：</strong>Windows Defender の SmartScreen が表示された場合は「詳細情報」から実行してください。発行元未署名のツールのため、警告が出ることがあります。
+      </div>
+    </section>
+
+    <section>
+      <h2>こんな方におすすめ</h2>
+      <ul>
+        <li>Quest内のVRChat写真をPCで管理したい</li>
+        <li>VRChatログをPCで分析・保管したい</li>
+        <li>ADB接続の状態を手軽に確認したい</li>
+        <li>WindowsでQuestデータをオフライン保存したい</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>注意事項</h2>
+      <ul>
+        <li>本ツールはADB（Android Debug Bridge）を使用します。事前にADBがインストールされている必要があります。</li>
+        <li>QuestとPCを接続する際は、データ通信対応のUSBケーブルをご利用ください。</li>
+        <li>初回接続時、Quest内でUSBデバッグ許可を求める画面が表示されます。「このPCへの接続を常に許可する」にチェックして許可してください。</li>
+      </ul>
+      <a class="button" href="README.md">詳細な使い方を見る</a>
+    </section>
+
+    <footer>
+      Quest VRChat Tool / QuestVRCTool &#8211; Windows 向けインポートツール
+    </footer>
+  </div>
+</body>
+</html>

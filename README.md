@@ -1,6 +1,8 @@
 # QVT-Tool 
 QuestとWindowsをつなぐインポートツール
 
+- [機能紹介ホームページ](index.html)
+
 ## 概要
 Quest単騎だとWindows側で写真を見るのがめんどくさい...
 オフラインで写真データをインポートしたい
