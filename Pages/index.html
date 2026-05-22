@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>QVPT - Quest VRChat Picture Tool</title>
+  <style>
+    body { margin: 0; background: #f8f9fa; color: #202122; font-family: "Segoe UI", "Hiragino Kaku Gothic Pro", Meiryo, sans-serif; }
+    .page { max-width: 1040px; margin: 0 auto; padding: 24px 20px; }
+    .page h1 { font-size: 2.4rem; font-weight: 600; margin: 0 0 6px; }
+    .subtitle { color: #5f6368; margin: 0 0 18px; font-size: 1rem; }
+    .summary { background: #fff; border: 1px solid #a2a9b1; padding: 20px 24px; border-radius: 2px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+    .summary p { margin: 0; line-height: 1.8; }
+    .infobox { float: right; margin: 0 0 1rem 1rem; width: 300px; border: 1px solid #a2a9b1; background: #fff; padding: 12px; font-size: 0.95rem; line-height: 1.5; }
+    .infobox img { width: 100%; display: block; margin-bottom: 0.75rem; border: 1px solid #d9d9d9; }
+    .infobox table { width: 100%; border-collapse: collapse; }
+    .infobox th, .infobox td { padding: 4px 6px; vertical-align: top; }
+    .infobox th { font-weight: 700; color: #202122; white-space: nowrap; width: 1%; text-align: left; }
+    .thumb { float: right; clear: right; margin: 0 0 1rem 1rem; width: 220px; border: 1px solid #a2a9b1; background-color: #f8f9fa; padding: 3px; font-size: 0.85rem; }
+    .thumb img { width: 100%; display: block; border: 1px solid #a2a9b1; margin-bottom: 3px; }
+    .thumb-caption { padding: 3px; line-height: 1.4; color: #54595d; text-align: left; }
+    .toc { border: 1px solid #a2a9b1; background: #fff; padding: 14px; width: 260px; font-size: 0.95rem; margin-bottom: 16px; }
+    .toc h2 { margin: 0 0 8px; font-size: 1rem; font-weight: 700; }
+    .toc ul { margin: 0; padding-left: 1rem; list-style: none; }
+    .toc li { margin: 6px 0; }
+    .toc a { color: #0645ad; text-decoration: none; }
+    h2 { font-size: 1.4rem; border-bottom: 1px solid #d9d9d9; padding-bottom: 8px; margin-top: 1.8rem; }
+    h3 { font-size: 1.15rem; margin-top: 1.4rem; }
+    p, ul, ol, dl, dd { font-size: 1rem; line-height: 1.8; color: #202122; }
+    ul, ol { padding-left: 1.4rem; }
+    a { color: #0645ad; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .button { display: inline-block; margin-top: 14px; padding: 10px 16px; border-radius: 4px; background: #0645ad; color: #fff; text-decoration: none; font-weight: 600; }
+    .button.secondary { background: #5f6368; margin-left: 10px; }
+    .note { margin: 18px 0; padding: 14px; background: #f8f9fa; border-left: 4px solid #5f6368; }
+    .clear { clear: both; }
+    footer { margin-top: 36px; padding-top: 18px; border-top: 1px solid #d9d9d9; color: #5f6368; font-size: 0.95rem; }
+    @media (max-width: 960px) { .infobox, .toc { float: none; width: auto; margin: 0 0 1rem; } }
+
+    /* モダル（拡大表示）のスタイル */
+    .modal { display: none; position: fixed; z-index: 1000; top: 0; left: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0); cursor: pointer; transition: background-color 0.3s ease; }
+    .modal.active { display: block; background-color: rgba(0,0,0,0.85); }
+    .modal img { position: absolute; border: 3px solid #fff; box-shadow: 0 0 20px rgba(0,0,0,0.5); object-fit: contain; transition: all 0.4s cubic-bezier(0.165, 0.84, 0.44, 1); opacity: 0; pointer-events: none; }
+    .modal.active img { opacity: 1; }
+    .modal-close { position: absolute; top: 20px; right: 30px; color: #fff; font-size: 40px; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <h1>QVPT - Quest VRChat Picture Tool</h1>
+    <p class="subtitle">Windows向けのQuest/VRChat写真・ログインポート・管理ツール</p>
+    <div class="summary">
+      <p>QVPT（Quest VRChat Picture Tool）は、Meta Quest2、3s、3等のQuestシリーズ と Windows を接続し、VRChat の写真およびログを PC に転送・保存・管理するための専用ツールです。Quest 単体では扱いにくいデータを Windows 上で取り出し、閲覧や分析を容易にします。</p>
+    </div>
+
+    <aside class="infobox">
+      <img src="./Elements/logo.png" alt="QVPT ロゴ" />
+      <table>
+        <tr><th>カテゴリ</th><td>Windowsユーティリティ</td></tr>
+        <tr><th>対応OS</th><td>Windows 10 / 11</td></tr>
+        <tr><th>主な機能</th><td>写真転送、ログ取得、ADB接続確認</td></tr>
+        <tr><th>必要条件</th><td>ADBインストール、QuestのUSBデバッグ</td></tr>
+        <tr><th>公式リンク</th><td><a href="../README.md">利用ガイド</a></td></tr>
+      </table>
+    </aside>
+
+    <div class="toc">
+      <h2>目次</h2>
+      <ul>
+        <li><a href="#概要">概要</a></li>
+        <li><a href="#主な機能">主な機能</a></li>
+        <li><a href="#利用手順">利用手順</a></li>
+        <li><a href="#adbのインストール">ADBのインストール</a></li>
+        <li><a href="#注意事項">注意事項</a></li>
+        <li><a href="#外部リンク">外部リンク</a></li>
+      </ul>
+    </div>
+
+    <h2 id="概要">概要</h2>
+    <p>本ソフトウェアは、Quest 内の VRChat 写真を PC に転送して保存する機能と、VRChat のログを取得して PC 上のログにマージする機能を提供します。ADB（Android Debug Bridge）を利用して Quest の USB デバッグ経由で通信を行います。</p>
+
+    <h2 id="主な機能">主な機能</h2>
+    <h3>VRChat写真のインポート</h3>
+    <div class="thumb">
+      <img src="./Elements/pic-03_file-example.png" alt="ファイル命名変更のサンプル" />
+      <div class="thumb-caption">ファイル命名変更のサンプル</div>
+    </div>
+    <p>Quest 内の VRChat 写真を PC にコピーし、視認性の高いファイル名で保存します。オフラインでも画像を閲覧しやすくします。</p>
+
+    <h3>ログの取得とマージ</h3>
+    <div class="thumb">
+      <img src="./Elements/pic-02_log-window.png" alt="アプリケーションログウィンドウ" />
+      <div class="thumb-caption">アプリケーションログウィンドウの拡大</div>
+    </div>
+    <p>Quest 内の VRChat ログを取得し、PC 上の既存ログに追記（マージ）します。デバッグや解析作業に利用可能です。</p>
+
+    <h3>ADB接続の確認</h3>
+    <div class="thumb">
+      <img src="./Elements/pic-04_list-of-ADB.png" alt="ADB接続確認" />
+      <div class="thumb-caption">ADBによる接続診断結果</div>
+    </div>
+    <p>Quest と PC の接続状態を確認し、USB デバッグが有効になっているかをチェックします。接続トラブルの診断に役立ちます。</p>
+
+    <h3>保存先の管理</h3>
+    <p><img src="./Elements/settings.png" style="float:left; margin-right:10px; border:1px solid #ddd;" width="48" height="48" alt="設定アイコン" />保存先フォルダーを指定し、ツールの設定を保存できます。次回起動時も同じ設定を利用できます。</p>
+
+    <h2 id="利用手順">利用手順</h2>
+    <div class="thumb">
+      <img src="./Elements/pic-01.png" alt="メイン画面とログウィンドウ" />
+      <div class="thumb-caption">メイン画面とログウィンドウの表示</div>
+    </div>
+    <ol>
+      <li>Quest を USB ケーブルで PC に接続し、Quest 内で USB デバッグを許可します。</li>
+      <li>保存先フォルダーを指定し、写真またはログのインポート対象を選択します。</li>
+      <li>「写真をインポート」または「ログをインポート＆マージ」を実行します。</li>
+    </ol>
+    <div class="note">Windows Defender の SmartScreen に警告が表示された場合は、「詳細情報」から実行してください。発行元未署名のため、警告が出る場合があります。</div>
+
+    <h2 id="adbのインストール">ADBのインストール</h2>
+    <div class="thumb">
+      <img src="./Elements/pic-05_ADB-install.png" alt="ADBインストール" />
+      <div class="thumb-caption">SDK Platform-Tools の導入</div>
+    </div>
+    <p>本ツールは ADB を利用します。ADB がインストールされていない場合は、公式ページから導入する必要があります。ADB が正しく導入されていないと、Quest が PC に認識されません。</p>
+    <a class="button" href="https://developer.android.com/studio/command-line/adb" target="_blank" rel="noopener">ADB をインストール</a>
+    <a class="button secondary" href="../README.md">詳細な使い方</a>
+
+    <h2 id="注意事項">注意事項</h2>
+    <ul>
+      <li>ADB は Android Debug Bridge です。Google 公式ページから導入してください。</li>
+      <li>Quest 側の USB デバッグ確認画面で「この PC への接続を常に許可する」にチェックして許可してください。</li>
+      <li>データ通信対応 USB ケーブルを使用し、未対応のケーブルでは充電不足に注意してください。</li>
+    </ul>
+
+    <h2 id="外部リンク">外部リンク</h2>
+    <ul>
+      <li><a href="../README.md">QVPT の使い方ガイド</a></li>
+      <li><a href="https://developer.android.com/studio/command-line/adb" target="_blank" rel="noopener">Google Android - ADB 公式ページ</a></li>
+    </ul>
+
+    <div class="clear"></div>
+    <footer>QVPT - Quest VRChat Picture Tool — Windows 向け VRChat 写真・ログ転送ツール</footer>
+  </div>
+
+  <!-- 拡大表示用モダル -->
+  <div id="imageModal" class="modal">
+    <span class="modal-close">&times;</span>
+    <img id="modalImg" src="" alt="拡大画像" />
+  </div>
+
+  <script>
+    const modal = document.getElementById('imageModal');
+    const modalImg = document.getElementById('modalImg');
+
+    // 画像をクリックした際のモーション処理
+    document.querySelectorAll('.thumb img, .infobox img, p img').forEach(img => {
+      img.style.cursor = 'zoom-in';
+      img.addEventListener('click', function() {
+        const rect = this.getBoundingClientRect();
+        
+        // 1. モーダル画像にソースをセットし、初期位置をクリックした画像に合わせる
+        modalImg.src = this.src;
+        modalImg.style.transition = 'none';
+        modalImg.style.top = rect.top + 'px';
+        modalImg.style.left = rect.left + 'px';
+        modalImg.style.width = rect.width + 'px';
+        modalImg.style.height = rect.height + 'px';
+        modalImg.style.opacity = '0';
+        
+        modal.style.display = 'block';
+        
+        // 2. 次のフレームでアニメーションを開始
+        requestAnimationFrame(() => {
+          modal.classList.add('active');
+          
+          const updatePosition = () => {
+            const viewW = window.innerWidth;
+            const viewH = window.innerHeight;
+            const imgRatio = modalImg.naturalWidth / modalImg.naturalHeight;
+            
+            let finalW = viewW * 0.9;
+            let finalH = finalW / imgRatio;
+            if (finalH > viewH * 0.9) {
+              finalH = viewH * 0.9;
+              finalW = finalH * imgRatio;
+            }
+
+            modalImg.style.transition = 'all 0.4s cubic-bezier(0.165, 0.84, 0.44, 1)';
+            modalImg.style.top = (viewH - finalH) / 2 + 'px';
+            modalImg.style.left = (viewW - finalW) / 2 + 'px';
+            modalImg.style.width = finalW + 'px';
+            modalImg.style.height = finalH + 'px';
+            modalImg.style.opacity = '1';
+          };
+
+          if (modalImg.complete) updatePosition(); else modalImg.onload = updatePosition;
+        });
+      });
+    });
+
+    // モーダルを閉じる処理
+    modal.addEventListener('click', () => {
+      modal.classList.remove('active');
+      modalImg.style.opacity = '0';
+      setTimeout(() => {
+        if (!modal.classList.contains('active')) {
+          modal.style.display = 'none';
+        }
+      }, 400); // アニメーション完了後に非表示
+    });
+  </script>
+</body>
+</html>
