@@ -42,7 +42,9 @@
     .modal.active { display: block; background-color: rgba(0,0,0,0.85); }
     .modal img { position: absolute; border: 3px solid #fff; box-shadow: 0 0 20px rgba(0,0,0,0.5); object-fit: contain; transition: all 0.4s cubic-bezier(0.165, 0.84, 0.44, 1); opacity: 0; pointer-events: none; }
     .modal.active img { opacity: 1; }
-    .modal-close { position: absolute; top: 20px; right: 30px; color: #fff; font-size: 40px; font-weight: bold; }
+    .modal-close { position: absolute; top: 20px; right: 30px; color: #fff; font-size: 40px; font-weight: bold; z-index: 1001; }
+    .modal-caption { position: absolute; bottom: 20px; left: 20px; padding: 10px 16px; background: rgba(0, 0, 0, 0.75); border-radius: 4px; color: #fff; font-size: 1rem; line-height: 1.4; opacity: 0; transition: opacity 0.4s ease; pointer-events: none; max-width: calc(100% - 40px); text-align: left; box-sizing: border-box; }
+    .modal.active .modal-caption { opacity: 1; }
   </style>
 </head>
 <body>
@@ -146,11 +148,46 @@
   <div id="imageModal" class="modal">
     <span class="modal-close">&times;</span>
     <img id="modalImg" src="" alt="拡大画像" />
+    <div id="modalCaption" class="modal-caption"></div>
   </div>
 
   <script>
     const modal = document.getElementById('imageModal');
     const modalImg = document.getElementById('modalImg');
+    const modalCaption = document.getElementById('modalCaption');
+    let typeWriterId = null;
+
+    // キャプションを1文字ずつタイピング表示する関数
+    function startTypeWriter(altText, fileName) {
+      if (typeWriterId) clearTimeout(typeWriterId);
+      modalCaption.innerHTML = '';
+
+      const strong = document.createElement('strong');
+      const br = document.createElement('br');
+      const span = document.createElement('span');
+      span.style.fontSize = '0.85rem';
+      span.style.color = '#ccc';
+
+      modalCaption.appendChild(strong);
+      modalCaption.appendChild(br);
+      modalCaption.appendChild(span);
+
+      let i = 0, j = 0;
+      const speed = 25; // タイピング速度 (ms)
+
+      function type() {
+        if (i < altText.length) {
+          strong.textContent += altText.charAt(i);
+          i++;
+          typeWriterId = setTimeout(type, speed);
+        } else if (j < fileName.length) {
+          span.textContent += fileName.charAt(j);
+          j++;
+          typeWriterId = setTimeout(type, speed);
+        }
+      }
+      type();
+    }
 
     // 画像をクリックした際のモーション処理
     document.querySelectorAll('.thumb img, .infobox img, p img').forEach(img => {
@@ -168,6 +205,10 @@
         modalImg.style.opacity = '0';
         
         modal.style.display = 'block';
+
+        // キャプションのタイプライター演出を開始
+        const fileName = decodeURIComponent(this.src.split('/').pop());
+        startTypeWriter(this.alt || "画像", fileName);
         
         // 2. 次のフレームでアニメーションを開始
         requestAnimationFrame(() => {
@@ -201,6 +242,7 @@
     // モーダルを閉じる処理
     modal.addEventListener('click', () => {
       modal.classList.remove('active');
+      if (typeWriterId) clearTimeout(typeWriterId);
       modalImg.style.opacity = '0';
       setTimeout(() => {
         if (!modal.classList.contains('active')) {
