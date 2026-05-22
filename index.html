@@ -25,7 +25,9 @@
     .toc li { margin: 6px 0; }
     .toc a { color: #0645ad; text-decoration: none; }
     h2 { font-size: 1.4rem; border-bottom: 1px solid #d9d9d9; padding-bottom: 8px; margin-top: 1.8rem; }
+    h2 img { width: 28px; height: 28px; vertical-align: middle; margin-right: 8px; }
     h3 { font-size: 1.15rem; margin-top: 1.4rem; }
+    h3 img { width: 22px; height: 22px; vertical-align: middle; margin-right: 6px; }
     p, ul, ol, dl, dd { font-size: 1rem; line-height: 1.8; color: #202122; }
     ul, ol { padding-left: 1.4rem; }
     a { color: #0645ad; text-decoration: none; }
@@ -78,35 +80,35 @@
       </ul>
     </div>
 
-    <h2 id="概要">概要</h2>
+    <h2 id="概要"><img src="https://img.icons8.com/color/48/info--v1.png" alt="" />概要</h2>
     <p>本ソフトウェアは、Quest 内の VRChat 写真を PC に転送して保存する機能と、VRChat のログを取得して PC 上のログにマージする機能を提供します。ADB（Android Debug Bridge）を利用して Quest の USB デバッグ経由で通信を行います。</p>
 
-    <h2 id="主な機能">主な機能</h2>
-    <h3>VRChat写真のインポート</h3>
+    <h2 id="主な機能"><img src="https://img.icons8.com/color/48/star--v1.png" alt="" />主な機能</h2>
+    <h3><img src="https://img.icons8.com/color/48/camera--v1.png" alt="" />VRChat写真のインポート</h3>
     <div class="thumb">
       <img src="./Pages/Elements/pic-03_file-example.png" alt="ファイル命名変更のサンプル" />
       <div class="thumb-caption">ファイル命名変更のサンプル</div>
     </div>
     <p>Quest 内の VRChat 写真を PC にコピーし、視認性の高いファイル名で保存します。オフラインでも画像を閲覧しやすくします。</p>
 
-    <h3>ログの取得とマージ</h3>
+    <h3><img src="https://img.icons8.com/color/48/scroll.png" alt="" />ログの取得とマージ</h3>
     <div class="thumb">
       <img src="./Pages/Elements/pic-02_log-window.png" alt="アプリケーションログウィンドウ" />
       <div class="thumb-caption">アプリケーションログウィンドウの拡大</div>
     </div>
     <p>Quest 内の VRChat ログを取得し、PC 上の既存ログに追記（マージ）します。デバッグや解析作業に利用可能です。</p>
 
-    <h3>ADB接続の確認</h3>
+    <h3><img src="https://img.icons8.com/color/48/usb-connector.png" alt="" />ADB接続の確認</h3>
     <div class="thumb">
       <img src="./Pages/Elements/pic-04_list-of-ADB.png" alt="ADB接続確認" />
       <div class="thumb-caption">ADBによる接続診断結果</div>
     </div>
     <p>Quest と PC の接続状態を確認し、USB デバッグが有効になっているかをチェックします。接続トラブルの診断に役立ちます。</p>
 
-    <h3>保存先の管理</h3>
-    <p><img src="./Pages/Elements/settings.png" style="float:left; margin-right:10px; border:1px solid #ddd;" width="48" height="48" alt="設定アイコン" />保存先フォルダーを指定し、ツールの設定を保存できます。次回起動時も同じ設定を利用できます。</p>
+    <h3><img src="https://img.icons8.com/color/48/settings--v1.png" alt="" />保存先の管理</h3>
+    <p>保存先フォルダーを指定し、ツールの設定を保存できます。次回起動時も同じ設定を利用できます。</p>
 
-    <h2 id="利用手順">利用手順</h2>
+    <h2 id="利用手順"><img src="https://img.icons8.com/color/48/list--v1.png" alt="" />利用手順</h2>
     <div class="thumb">
       <img src="./Pages/Elements/pic-01.png" alt="メイン画面とログウィンドウ" />
       <div class="thumb-caption">メイン画面とログウィンドウの表示</div>
@@ -118,7 +120,7 @@
     </ol>
     <div class="note">Windows Defender の SmartScreen に警告が表示された場合は、「詳細情報」から実行してください。発行元未署名のため、警告が出る場合があります。</div>
 
-    <h2 id="adbのインストール">ADBのインストール</h2>
+    <h2 id="adbのインストール"><img src="https://img.icons8.com/color/48/download--v1.png" alt="" />ADBのインストール</h2>
     <div class="thumb">
       <img src="./Pages/Elements/pic-05_ADB-install.png" alt="ADBインストール" />
       <div class="thumb-caption">SDK Platform-Tools の導入</div>
@@ -127,14 +129,14 @@
     <a class="button" href="https://developer.android.com/studio/command-line/adb" target="_blank" rel="noopener">ADB をインストール</a>
     <a class="button secondary" href="README.md">詳細な使い方</a>
 
-    <h2 id="注意事項">注意事項</h2>
+    <h2 id="注意事項"><img src="https://img.icons8.com/color/48/warning-shield.png" alt="" />注意事項</h2>
     <ul>
       <li>ADB は Android Debug Bridge です。Google 公式ページから導入してください。</li>
       <li>Quest 側の USB デバッグ確認画面で「この PC への接続を常に許可する」にチェックして許可してください。</li>
       <li>データ通信対応 USB ケーブルを使用し、未対応のケーブルでは充電不足に注意してください。</li>
     </ul>
 
-    <h2 id="外部リンク">外部リンク</h2>
+    <h2 id="外部リンク"><img src="https://img.icons8.com/color/48/external-link.png" alt="" />外部リンク</h2>
     <ul>
       <li><a href="README.md">QVPT の使い方ガイド</a></li>
       <li><a href="https://developer.android.com/studio/command-line/adb" target="_blank" rel="noopener">Google Android - ADB 公式ページ</a></li>
@@ -142,7 +144,8 @@
     </ul>
 
     <div class="clear"></div>
-    <footer>QVPT - Quest VRChat Picture Tool — Windows 向け VRChat 写真・ログ転送ツール</footer>
+    <footer>QVPT - Quest VRChat Picture Tool — Windows 向け VRChat 写真・ログインポート・管理ツール</footer>
+    <footer>アイコンに icons8 のアイコンアセットを使用しています。</footer>
   </div>
 
   <!-- 拡大表示用モダル -->
