@@ -12,12 +12,24 @@ import sys
 import re
 import urllib.parse
 import sqlite3
+import shutil
+import time
+from typing import Optional, List
+from pydantic import BaseModel
+from fastapi import FastAPI
+import uvicorn
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+import paramiko
+from scp import SCPClient
 import hashlib
 from datetime import datetime
 
 # 文字コード設定
 os.environ['PYTHONIOENCODING'] = 'utf-8'
 locale.setlocale(locale.LC_ALL, 'ja_JP.UTF-8')
+
+observer = None
 
 def get_app_dir():
     """実行ファイルのあるディレクトリを返す（PyInstaller 実行時には exe のディレクトリ）。"""
@@ -78,12 +90,20 @@ DEFAULT_CONFIG = {
     "photo_naming_template": "{date}_{time}_{world}_{instance}",
     "db_naming_template": "vrchat_logs_{date}_{time}",
     "photo_db_path": "",
+    "master_log_db_path": "", # 新しい統合ログDBのパス
     "local_log_path": "",
     "import_logs_with_photos": True,
     "temp_path": os.path.join(os.environ.get('LOCALAPPDATA', os.path.expanduser('~')), 'QVPTool'),
     "adb_auto_start": True,
     "log_target_path": r"S:\VRChat-Logs",
     "log_source_path": "/storage/emulated/0/Documents/Logs",
+    "server_ip": "192.168.0.109",
+    "server_port": "9800",
+    "server_user": "ituki",
+    "server_pass": "",
+    "api_port": 1010,
+    "input_dir": "C:/Users/ituki/Pictures/VRChat_Input",
+    "naming_template": "VRC_{date}_{world}_{user}_{seq}",
     "comment": "保存先フォルダパス、リネーム設定、一時フォルダーパスなど。GUIで変更可能。"
 }
 
@@ -120,16 +140,148 @@ def load_version():
                 return version_data.get("version", "1.0.0"), version_data.get("build_number", "unknown")
         except Exception as e:
             print(f"バージョン設定ファイルの読み込みエラー: {e}")
-            return "1.0.0", "unknown"
     return "1.0.0", "unknown"
+
+# --- Database & Models (LODDB) ---
+def init_photo_db():
+    db_path = config.get("photo_db_path") or os.path.join(APP_DIR, "photos.db")
+    if os.path.dirname(db_path):
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS photos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            file_hash TEXT UNIQUE,
+            original_path TEXT,
+            managed_path TEXT,
+            file_name TEXT,
+            created_at TIMESTAMP,
+            world_name TEXT,
+            instance_id TEXT,
+            user_name TEXT
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+class PhotoRecord(BaseModel):
+    id: int
+    file_name: str
+    world_name: str
+    managed_path: str
+
+# --- Real-time Processing Engine ---
+def calculate_hash(file_path: str) -> str:
+    sha256_hash = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        for byte_block in iter(lambda: f.read(4096), b""):
+            sha256_hash.update(byte_block)
+    return sha256_hash.hexdigest()
+
+def process_new_monitored_image(file_path: str):
+    """監視ディレクトリの新規画像を処理（LODDB登録）"""
+    try:
+        file_name = os.path.basename(file_path)
+        file_hash = calculate_hash(file_path)
+        db_path = config.get("photo_db_path") or os.path.join(APP_DIR, "photos.db")
+        
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM photos WHERE file_hash = ?", (file_hash,))
+        if cursor.fetchone():
+            conn.close()
+            return
+
+        date_part, time_part = extract_screenshot_timestamp(file_name)
+        dt = datetime.now()
+        if date_part and time_part:
+            dt = datetime.strptime(f"{date_part}{time_part}", '%Y%m%d%H%M%S')
+
+        # 既存のログ解析ロジックを流用してワールド特定を試みる
+        photo_locations = parse_vrchat_log_photo_locations(config.get("log_target_path"))
+        loc = photo_locations.get(os.path.splitext(file_name)[0], {"world_name": "Unknown", "instance_id": "Unknown"})
+        
+        world = loc['world_name']
+        user = config.get("server_user", "ituki")
+        
+        new_name = config.get("naming_template", "VRC_{date}_{world}_{user}_{seq}").format(
+            date=dt.strftime("%Y%m%d_%H%M%S"),
+            world=world,
+            user=user,
+            seq=file_hash[:8]
+        ) + os.path.splitext(file_path)[1]
+
+        managed_path = os.path.join(config["target_path"], new_name)
+        os.makedirs(config["target_path"], exist_ok=True)
+        shutil.copy2(file_path, managed_path)
+
+        cursor.execute('''
+            INSERT INTO photos (file_hash, original_path, managed_path, file_name, created_at, world_name, user_name)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (file_hash, file_path, managed_path, new_name, datetime.now(), world, user))
+        conn.commit()
+        if 'log_win' in globals() and log_win:
+            log_win.log(f"リアルタイム管理完了: {new_name}")
+    except Exception as e:
+        print(f"Error in processing monitored image: {e}")
+    finally:
+        conn.close()
+
+class VRCPhotoHandler(FileSystemEventHandler):
+    def on_created(self, event):
+        file_path = event.src_path
+        # event.src_path が bytes 型の場合があるため str に変換して Pylance の型エラーを回避
+        if isinstance(file_path, bytes):
+            file_path = file_path.decode('utf-8', 'replace')
+        if not event.is_directory and file_path.lower().endswith(('.png', '.jpg', '.jpeg')):
+            process_new_monitored_image(file_path)
+
+def start_observer():
+    path = config.get("input_dir")
+    if not path or not os.path.exists(path): return None
+    event_handler = VRCPhotoHandler()
+    obs = Observer()
+    obs.schedule(event_handler, path, recursive=False)
+    obs.start()
+    if 'log_win' in globals() and log_win:
+        log_win.log(f"監視を開始しました: {path}")
+    return obs
+
+# --- FastAPI Web API ---
+app = FastAPI(title="QVPTool Integrated API")
+
+@app.get("/api/photos", response_model=List[PhotoRecord])
+async def get_photos(world: Optional[str] = None):
+    db_path = config.get("photo_db_path") or os.path.join(APP_DIR, "photos.db")
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    if world:
+        cursor.execute("SELECT id, file_name, world_name, managed_path FROM photos WHERE world_name LIKE ?", (f"%{world}%",))
+    else:
+        cursor.execute("SELECT id, file_name, world_name, managed_path FROM photos ORDER BY created_at DESC LIMIT 100")
+    rows = cursor.fetchall()
+    conn.close()
+    return [{"id": r[0], "file_name": r[1], "world_name": r[2], "managed_path": r[3]} for r in rows]
+
+def run_api():
+    try:
+        uvicorn.run(app, host="0.0.0.0", port=config.get("api_port", 1010), log_level="error")
+    except Exception as e:
+        print(f"API Error: {e}")
+
+def on_app_exit():
+    """終了時にサーバーを停止しリソースを解放"""
+    run_service_control("stop", silent=True)
+    if observer:
+        observer.stop()
+    root.destroy()
 
 
 def sanitize_filename(value, max_length=120):
-    """ファイル名に使える文字列に整形する"""
     value = str(value or "").strip()
     if not value:
         return "Unknown"
-
     replacements = {
         '/': '／',
         '\\': '＼',
@@ -196,18 +348,22 @@ def parse_vrchat_log_photo_locations(log_root):
     if not log_root or not os.path.exists(log_root):
         return locations
 
-    world_patterns = [
-        re.compile(r'Entering Room: (?P<world>.+?) \((?P<instance>[^)]+)\)', re.I),
-        re.compile(r'Joined world "(?P<world>[^"]+)" \((?P<instance>[^)]+)\)', re.I),
-        re.compile(r'Loaded world "(?P<world>[^"]+)" \((?P<instance>[^)]+)\)', re.I),
-        re.compile(r'Joining instance (?P<world>[^()]+?) \((?P<instance>[^)]+)\)', re.I),
-        re.compile(r'Joined world (?P<world>[^()]+?) \((?P<instance>[^)]+)\)', re.I),
+    # ワールド名とインスタンスIDを特定するための複数の正規表現
+    # ワールド名とインスタンスIDを特定するための正規表現
+    patterns = [
+        re.compile(r'Entering Room: (?P<world>.+?) \((?P<instance>[^)]+)\)', re.I), # PC版標準
+        re.compile(r'Entering Room: (?P<world>.+)$', re.I),                          # Quest版1/2
+        re.compile(r'Joining (friend: )?(?P<instance>wrld_[^~\r\n]+)', re.I),        # Quest版2/2
+        re.compile(r'Destination (requested|fetching|set): (?P<instance>wrld_[^\r\n]+)', re.I), # Quest版 目的地設定
+        re.compile(r'Joined world "(?P<world>[^"]+)"', re.I),
+        re.compile(r'Loaded world "(?P<world>[^"]+)"', re.I),
     ]
+
+    # スクリーンショット撮影ログの特定 (Captured... はPC版、Took... はQuest版)
     screenshot_pattern = re.compile(
-        r'Captured screenshot at: .*?[\\/](?P<filename>[^\\/:*?"<>|\r\n]+\.png)',
+        r'(Captured screenshot at:|Took screenshot to:).*?[\\/](?P<filename>[^\\/:*?"<>|\r\n]+\.png)',
         re.I,
     )
-    generic_png_pattern = re.compile(r'(?P<filename>[^\\/:*?"<>|\r\n]+\.png)', re.I)
 
     current_world = None
     current_instance = None
@@ -220,36 +376,28 @@ def parse_vrchat_log_photo_locations(log_root):
             try:
                 with open(log_path, 'r', encoding='utf-8', errors='replace') as f:
                     for line in f:
-                        for pattern in world_patterns:
+                        # 1. 場所情報の更新 (ワールド名またはインスタンスID)
+                        for pattern in patterns:
                             match = pattern.search(line)
                             if match:
-                                current_world = match.group('world').strip()
-                                current_instance = match.group('instance').strip()
+                                if 'world' in match.groupdict():
+                                    current_world = match.group('world').strip()
+                                if 'instance' in match.groupdict():
+                                    current_instance = match.group('instance').strip()
                                 break
 
-                        if 'captured screenshot at' in line.lower():
-                            match = screenshot_pattern.search(line)
-                            if match:
-                                filename = match.group('filename').strip()
-                            else:
+                        # 2. 撮影イベントの検知
+                        match = screenshot_pattern.search(line)
+                        if match:
+                            filename = match.group('filename').strip()
+                            base_name = os.path.splitext(filename)[0]
+                            if not base_name or base_name in locations:
                                 continue
-                        elif '.png' in line.lower():
-                            match = generic_png_pattern.search(line)
-                            if match:
-                                filename = match.group('filename').strip()
-                            else:
-                                continue
-                        else:
-                            continue
 
-                        base_name = os.path.splitext(filename)[0]
-                        if not base_name or base_name in locations:
-                            continue
-
-                        locations[base_name] = {
-                            'world_name': sanitize_filename(current_world or 'Unknown'),
-                            'instance_id': sanitize_filename(current_instance or 'Unknown'),
-                        }
+                            locations[base_name] = {
+                                'world_name': sanitize_filename(current_world or 'Unknown'),
+                                'instance_id': sanitize_filename(current_instance or 'Unknown'),
+                            }
             except Exception:
                 continue
 
@@ -334,6 +482,30 @@ def build_db_path(base_dir, template, data):
     return ensure_unique_filepath(db_path)
 
 
+def get_screenshot_timestamp_from_db(db_path, screenshot_filename_base):
+    """DBからスクリーンショットの正確なタイムスタンプを取得する"""
+    if not db_path or not os.path.exists(db_path):
+        return None
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        with conn:
+            # "Captured..." (PC) と "Took..." (Quest) の両キーワードを検索対象に
+            cursor = conn.execute(
+                "SELECT timestamp FROM log_records WHERE (message LIKE ? OR message LIKE ?) ORDER BY timestamp DESC LIMIT 1",
+                (f"%Captured screenshot at: %{screenshot_filename_base}.png%",
+                 f"%Took screenshot to: %{screenshot_filename_base}.png%")
+            )
+            result = cursor.fetchone()
+            if result:
+                # タイムスタンプ文字列を datetime オブジェクトに変換
+                return datetime.strptime(result[0], '%Y.%m.%d %H:%M:%S')
+    except Exception:
+        pass # エラーは無視して None を返す
+    finally:
+        if conn: conn.close()
+    return None
+
 def create_or_update_log_db(db_path, log_directory):
     """ログファイルを SQLite DB にインポート・追記する"""
     if not os.path.exists(log_directory):
@@ -353,6 +525,16 @@ def create_or_update_log_db(db_path, log_directory):
                 ")"
             )
             conn.execute(
+                "CREATE TABLE IF NOT EXISTS log_records ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "log_id INTEGER, "
+                "timestamp TEXT, "
+                "level TEXT, "
+                "message TEXT, "
+                "FOREIGN KEY(log_id) REFERENCES imported_logs(id)"
+                ")"
+            )
+            conn.execute(
                 "CREATE TABLE IF NOT EXISTS photo_locations ("
                 "id INTEGER PRIMARY KEY, "
                 "screenshot_name TEXT UNIQUE, "
@@ -363,19 +545,45 @@ def create_or_update_log_db(db_path, log_directory):
                 ")"
             )
 
+            log_line_pattern = re.compile(r'^(\d{4}\.\d{2}\.\d{2} \d{2}:\d{2}:\d{2}) (\w+)\s+-  (.*)$')
+
             for root_dir, dirs, files in os.walk(log_directory):
                 for file in files:
                     if not file.lower().endswith('.txt'):
                         continue
                     log_path = os.path.join(root_dir, file)
+                    rel_path = os.path.relpath(log_path, log_directory)
                     try:
                         with open(log_path, 'r', encoding='utf-8', errors='replace') as f:
                             content = f.read()
                         imported_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                         conn.execute(
                             "INSERT OR IGNORE INTO imported_logs (log_name, log_path, imported_at, content) VALUES (?, ?, ?, ?)",
-                            (file, os.path.relpath(log_path, log_directory), imported_at, content),
+                            (file, rel_path, imported_at, content),
                         )
+                        
+                        # 構造化データの保存（既存データは一旦削除して再登録）
+                        res = conn.execute("SELECT id FROM imported_logs WHERE log_path=?", (rel_path,)).fetchone()
+                        if res:
+                            log_id = res[0]
+                            conn.execute("DELETE FROM log_records WHERE log_id=?", (log_id,))
+                            cursor = conn.cursor()
+                            last_record_id = None
+                            for line in content.splitlines():
+                                match = log_line_pattern.match(line)
+                                if match:
+                                    ts, lv, msg = match.groups()
+                                    cursor.execute(
+                                        "INSERT INTO log_records (log_id, timestamp, level, message) VALUES (?, ?, ?, ?)",
+                                        (log_id, ts, lv, msg)
+                                    )
+                                    last_record_id = cursor.lastrowid
+                                elif last_record_id is not None and line.strip():
+                                    # ヘッダーがない行は前のメッセージの続きとして扱う
+                                    cursor.execute(
+                                        "UPDATE log_records SET message = message || '\n' || ? WHERE id = ?",
+                                        (line, last_record_id)
+                                    )
                     except Exception:
                         continue
 
@@ -500,6 +708,19 @@ def browse_photo_db_file():
         save_settings()
 
 
+def browse_master_log_db_file():
+    """統合ログDBファイルを選択する"""
+    current_path = master_log_db_path_var.get()
+    initial_dir = os.path.dirname(current_path) if current_path and os.path.exists(os.path.dirname(current_path)) else os.path.expanduser("~")
+    initial_dir = os.path.dirname(current_path) if current_path and os.path.isdir(os.path.dirname(current_path)) else os.path.expanduser("~")
+    filename = filedialog.askopenfilename(
+        title="統合ログDBファイルを選択 (または新規作成)",
+        initialdir=initial_dir,
+        filetypes=[("SQLite DB", "*.db"), ("すべてのファイル", "*.*")],
+    )
+    if filename:
+        master_log_db_path_var.set(filename)
+        save_settings()
 def inspect_photo_db_content():
     """選択されたDBの内容を確認する"""
     db_path = photo_db_path_var.get().strip()
@@ -531,18 +752,24 @@ def inspect_photo_db_content():
 
 def save_settings():
     """設定タブの入力値をconfig.jsonに保存"""
+    global config
     config = {
         "target_path": target_path_var.get(),
         "rename_suffix": rename_suffix_var.get(),
         "photo_naming_template": photo_naming_template_var.get(),
         "db_naming_template": db_naming_template_var.get(),
         "photo_db_path": photo_db_path_var.get(),
+        "master_log_db_path": master_log_db_path_var.get(),
         "local_log_path": local_log_path_var.get(),
         "import_logs_with_photos": import_logs_with_photos_var.get(),
         "temp_path": temp_path_var.get(),
         "adb_auto_start": adb_auto_start_var.get(),
         "log_target_path": log_target_path_var.get(),
         "log_source_path": log_source_path_var.get(),
+        "server_ip": server_ip_var.get(),
+        "server_port": server_port_var.get(),
+        "server_user": server_user_var.get(),
+        "api_port": int(api_port_var.get() or 1010),
         "comment": "保存先フォルダパス、リネーム設定、一時フォルダーパスなど。GUIで変更可能。"
     }
     if save_config(config):
@@ -556,6 +783,7 @@ def reset_settings():
         photo_naming_template_var.set(DEFAULT_CONFIG["photo_naming_template"])
         db_naming_template_var.set(DEFAULT_CONFIG["db_naming_template"])
         import_logs_with_photos_var.set(DEFAULT_CONFIG["import_logs_with_photos"])
+        master_log_db_path_var.set(DEFAULT_CONFIG["master_log_db_path"])
         temp_path_var.set(DEFAULT_CONFIG["temp_path"])
         adb_auto_start_var.set(DEFAULT_CONFIG["adb_auto_start"])
         photo_db_path_var.set(DEFAULT_CONFIG["photo_db_path"])
@@ -574,6 +802,7 @@ def load_default_settings():
         photo_naming_template_var.set(DEFAULT_CONFIG["photo_naming_template"])
         db_naming_template_var.set(DEFAULT_CONFIG["db_naming_template"])
         import_logs_with_photos_var.set(DEFAULT_CONFIG["import_logs_with_photos"])
+        master_log_db_path_var.set(DEFAULT_CONFIG["master_log_db_path"])
         temp_path_var.set(DEFAULT_CONFIG["temp_path"])
         adb_auto_start_var.set(DEFAULT_CONFIG["adb_auto_start"])
         photo_db_path_var.set(DEFAULT_CONFIG["photo_db_path"])
@@ -587,6 +816,7 @@ def load_default_settings():
             "photo_naming_template": photo_naming_template_var.get(),
             "db_naming_template": db_naming_template_var.get(),
             "photo_db_path": photo_db_path_var.get(),
+            "master_log_db_path": master_log_db_path_var.get(),
             "local_log_path": local_log_path_var.get(),
             "import_logs_with_photos": import_logs_with_photos_var.get(),
             "temp_path": temp_path_var.get(),
@@ -611,6 +841,7 @@ def load_default_settings():
             "photo_naming_template": DEFAULT_CONFIG["photo_naming_template"],
             "db_naming_template": DEFAULT_CONFIG["db_naming_template"],
             "photo_db_path": DEFAULT_CONFIG["photo_db_path"],
+            "master_log_db_path": DEFAULT_CONFIG["master_log_db_path"],
             "local_log_path": DEFAULT_CONFIG["local_log_path"],
             "import_logs_with_photos": DEFAULT_CONFIG["import_logs_with_photos"],
             "temp_path": DEFAULT_CONFIG["temp_path"],
@@ -640,6 +871,8 @@ def _run_import_worker():
     
     target_path = target_path_var.get()
     rename_suffix = rename_suffix_var.get()
+    master_db = master_log_db_path_var.get().strip()
+    temp_path = temp_path_var.get()
 
     if not target_path.strip():
         import_queue.put(("error", "保存先フォルダを指定してください。"))
@@ -755,16 +988,44 @@ def _run_import_worker():
             import_queue.put(("log", "✓ ファイル転送完了"))
 
             # DB形式のログがあれば優先利用する
+            # 写真インポートと同時にログも取得してDBを更新する
+            if master_db:
+                import_queue.put(("log", "[5.5/6] ログを自動同期中..."))
+                import_queue.put(("status", "最新のログをDBへ統合中..."))
+                log_temp = os.path.join(temp_path, "Auto_Log_Temp")
+                os.makedirs(log_temp, exist_ok=True)
+                
+                # ログを取得
+                subprocess.run(["adb", "pull", log_source_path_var.get(), log_temp], capture_output=True, timeout=60)
+                
+                # DBを更新
+                if create_or_update_log_db(master_db, log_temp):
+                    import_queue.put(("log", "✓ マスターDBを最新の状態に更新しました"))
+                
+                try: shutil.rmtree(log_temp)
+                except: pass
+
+            # 最新の位置情報をロード
             photo_locations = {}
             selected_db = photo_db_path_var.get().strip()
+            log_db_for_photo_info = None # タイムスタンプ取得に使うDB
             if selected_db and os.path.exists(selected_db):
                 import_queue.put(("log", f"✓ 選択DBをロード中: {selected_db}"))
                 photo_locations = load_photo_locations_from_db(selected_db)
+                log_db_for_photo_info = selected_db
                 if photo_locations:
                     import_queue.put(("log", f"✓ DBから位置情報を取得しました: {len(photo_locations)}件"))
                 else:
                     import_queue.put(("warning", "選択DBから位置情報が読み取れませんでした。ログ解析にフォールバックします。"))
+            
+            if not photo_locations and master_db and os.path.exists(master_db):
+                import_queue.put(("log", f"✓ マスターDBから情報を取得します"))
+                photo_locations = load_photo_locations_from_db(master_db)
+                log_db_for_photo_info = master_db
 
+            if photo_locations:
+                import_queue.put(("log", f"✓ 位置情報キャッシュをロード: {len(photo_locations)}件"))
+            
             if not photo_locations and local_log_path_var.get().strip():
                 local_log_path = local_log_path_var.get().strip()
                 if os.path.exists(local_log_path):
@@ -780,6 +1041,7 @@ def _run_import_worker():
                 if db_path:
                     import_queue.put(("log", f"✓ 最新DBを検出しました: {db_path}"))
                     photo_locations = load_photo_locations_from_db(db_path)
+                    log_db_for_photo_info = db_path
                     if photo_locations:
                         import_queue.put(("log", f"✓ 最新DBから位置情報を取得しました: {len(photo_locations)}件"))
                     else:
@@ -820,29 +1082,49 @@ def _run_import_worker():
                     for file in files:
                         filepath = os.path.join(root_dir, file)
                         filename, ext = os.path.splitext(file)
-                        new_filename = None
+                        
                         final_filename = file
                         world_name = 'Unknown'
                         instance_id = 'Unknown'
                         instance_url = ''
+                        screenshot_dt = None
 
                         if ext.lower() == ".png":
-                            photo_location = find_photo_location(filename, photo_locations, rename_suffix)
-                            if photo_location:
-                                world_name = photo_location['world_name']
-                                instance_id = photo_location['instance_id']
-                                date_part, time_part = extract_screenshot_timestamp(filename)
-                                if date_part and time_part:
-                                    new_filename = build_safe_photo_filename(date_part, time_part, world_name, instance_id, ext)
-                                else:
-                                    safe_world = sanitize_filename(world_name, max_length=100)
-                                    safe_instance = sanitize_filename(instance_id, max_length=60)
-                                    new_filename = f"{safe_world}_{safe_instance}{ext}"
-                            elif not filename.endswith(rename_suffix):
-                                new_filename = filename + rename_suffix + ext
+                            photo_location_data = find_photo_location(filename, photo_locations, rename_suffix)
+                            if photo_location_data:
+                                world_name = photo_location_data['world_name']
+                                instance_id = photo_location_data['instance_id']
+
+                            # DBから正確なタイムスタンプを取得
+                            if log_db_for_photo_info:
+                                screenshot_dt = get_screenshot_timestamp_from_db(log_db_for_photo_info, filename)
+
+                            # DBからの取得に失敗した場合、ファイル名から解析
+                            if not screenshot_dt:
+                                date_str, time_str = extract_screenshot_timestamp(filename)
+                                if date_str and time_str:
+                                    try:
+                                        screenshot_dt = datetime.strptime(f"{date_str}{time_str}", '%Y%m%d%H%M%S')
+                                    except ValueError:
+                                        pass # 解析失敗時は次のフォールバックへ
+
+                            # 最終フォールバック: 現在時刻
+                            if not screenshot_dt:
+                                screenshot_dt = datetime.now()
+
+                            # DBからの高精度な時刻または解析時刻を使用してリネーム
+                            name_data = {
+                                'date': screenshot_dt.strftime('%Y%m%d'),
+                                'time': screenshot_dt.strftime('%H%M%S'),
+                                'world': world_name,
+                                'instance': instance_id,
+                                'original': filename,
+                                'ext': ext
+                            }
+                            new_filename_base = format_template_string(photo_naming_template_var.get(), name_data)
+                            new_filename = f"{new_filename_base}{rename_suffix}{ext}"
 
                             instance_url = build_vrchat_world_url(world_name if world_name != 'Unknown' else None, instance_id if instance_id != 'Unknown' else None)
-
                         if new_filename:
                             new_filepath = os.path.join(root_dir, new_filename)
                             if os.path.exists(new_filepath):
@@ -1117,12 +1399,17 @@ def _run_db_import_worker():
         if os.path.exists(os.path.join(temp_path, "Logs")):
             pulled_logs_dir = os.path.join(temp_path, "Logs")
 
-        now = datetime.now()
-        db_path = build_db_path(target_path, db_naming_template_var.get(), {
-            'date': now.strftime('%Y%m%d'),
-            'time': now.strftime('%H%M%S'),
-        })
-
+        # 統合ログDBパスが設定されている場合はそれを使用、そうでなければ新規作成
+        db_path = master_log_db_path_var.get().strip()
+        if not db_path:
+            now = datetime.now()
+            db_path = build_db_path(target_path, db_naming_template_var.get(), {
+                'date': now.strftime('%Y%m%d'),
+                'time': now.strftime('%H%M%S'),
+            })
+        else:
+            os.makedirs(os.path.dirname(db_path), exist_ok=True) # 統合DBのディレクトリを確保
+            
         if create_or_update_log_db(db_path, pulled_logs_dir):
             import_queue.put(("log", f"✓ DBを作成しました: {db_path}"))
             import_queue.put(("success", f"DBインポートが完了しました。\n保存先: {db_path}"))
@@ -1153,6 +1440,216 @@ def run_db_import():
     import_thread = threading.Thread(target=_run_db_import_worker, daemon=True)
     import_thread.start()
 
+def run_service_control(action, silent=False):
+    """サーバーサービスの開始・停止を実行"""
+    host = config.get("server_ip")
+    port = config.get("server_port")
+    user = config.get("server_user")
+    pwd = config.get("server_pass")
+    
+    if not all([host, port, user, pwd]):
+        if not silent: messagebox.showwarning("警告", "サーバー接続情報が不足しています。")
+        return
+
+    def worker():
+        if not silent: log_win.log(f"サーバーサービスを {action} 中...")
+        try:
+            ssh = paramiko.SSHClient()
+            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            ssh.connect(host, port=int(port), username=user, password=pwd, timeout=10)
+            cmd = f"sudo systemctl {action} vrc-manager"
+            stdin, stdout, stderr = ssh.exec_command(cmd, get_pty=True)
+            import time
+            time.sleep(0.5)
+            stdin.write(pwd + "\n")
+            stdin.flush()
+            stdout.channel.recv_exit_status()
+            ssh.close()
+            if not silent: log_win.log(f"サービス {action} 完了")
+        except Exception as e:
+            if not silent: log_win.log(f"サービス操作エラー ({action}): {e}")
+
+    threading.Thread(target=worker, daemon=True).start()
+
+def run_deploy_worker():
+    """サーバーへのデプロイ処理"""
+    host, port, user, pwd = config.get("server_ip"), config.get("server_port"), config.get("server_user"), config.get("server_pass")
+    if not all([host, port, user, pwd]):
+        messagebox.showerror("エラー", "サーバー設定を入力してください。")
+        return
+
+    project_dir = "/srv/vrc/photo_manager"
+    log_win.log(f"--- サーバーデプロイ開始: {host} ---")
+    
+    try:
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh.connect(host, port=int(port), username=user, password=pwd, timeout=30, allow_agent=False, look_for_keys=False)
+        
+        def exec_remote(cmd):
+            stdin, stdout, stderr = ssh.exec_command(cmd, get_pty=True)
+            time.sleep(1.0)
+            stdin.write(pwd + "\n")
+            stdin.flush()
+            return stdout.channel.recv_exit_status()
+
+        import time
+        api_port = config.get("api_port", 1010)
+
+        log_win.log("依存パッケージのインストール...")
+        exec_remote("sudo apt-get update && sudo apt-get install -y python3-venv python3-pip exiftool sqlite3")
+        exec_remote(f"sudo mkdir -p {project_dir} /srv/vrc/input /srv/vrc/photos /srv/vrc/loddb && sudo chown -R {user}:{user} /srv/vrc")
+
+        log_win.log(f"ファイアウォールの設定 (Port: {api_port})...")
+        exec_remote(f"sudo ufw allow {api_port}/tcp")
+
+        # サーバー設定生成
+        srv_conf = DEFAULT_CONFIG.copy() # 最新の構造を使用
+        srv_conf.update(config)
+        srv_conf.update({"log_dir": "/srv/vrc/logs", "db_path": "/srv/vrc/loddb/photos.db", "input_dir": "/srv/vrc/input", "output_dir": "/srv/vrc/photos", "server_ip": "0.0.0.0"})
+        with open("config_server.json", "w", encoding="utf-8") as f: json.dump(srv_conf, f, indent=2)
+
+        log_win.log("ファイルを転送中...")
+        with SCPClient(ssh.get_transport()) as scp:
+            scp.put(os.path.join(APP_DIR, "server_main.py"), f"{project_dir}/main.py")
+            scp.put("config_server.json", f"{project_dir}/config.json")
+            scp.put(os.path.join(APP_DIR, "requirements.txt"), f"{project_dir}/requirements.txt")
+        os.remove("config_server.json")
+
+        log_win.log("仮想環境の構築...")
+        # サーバー側で requirements.txt を元にインストール
+        exec_remote(f"python3 -m venv {project_dir}/venv && {project_dir}/venv/bin/pip install -r {project_dir}/requirements.txt")
+
+        service_content = f"""[Unit]\nDescription=VRC Photo Manager\nAfter=network.target\n[Service]\nUser={user}\nWorkingDirectory={project_dir}\nExecStart={project_dir}/venv/bin/python3 {project_dir}/main.py\nRestart=always\n[Install]\nWantedBy=multi-user.target"""
+        with open("vrc-manager.service", "w") as f: f.write(service_content)
+        with SCPClient(ssh.get_transport()) as scp: scp.put("vrc-manager.service", "/tmp/vrc-manager.service")
+        os.remove("vrc-manager.service")
+        
+        exec_remote("sudo mv /tmp/vrc-manager.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable vrc-manager && sudo systemctl restart vrc-manager")
+        
+        ssh.close()
+        log_win.log("--- デプロイ完了！ ---")
+        messagebox.showinfo("成功", "サーバーへのデプロイが完了しました。")
+    except Exception as e:
+        log_win.log(f"デプロイ失敗: {e}")
+        messagebox.showerror("エラー", f"デプロイ失敗:\n{e}")
+
+def run_uninstall_worker():
+    """サーバーからプログラムを削除"""
+    if not messagebox.askyesno("確認", "サーバー上のプログラムとサービスを削除しますか？"): return
+    host, port, user, pwd = config.get("server_ip"), config.get("server_port"), config.get("server_user"), config.get("server_pass")
+    
+    try:
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh.connect(host, port=int(port), username=user, password=pwd, timeout=20)
+        
+        stdin, stdout, stderr = ssh.exec_command("sudo systemctl stop vrc-manager && sudo systemctl disable vrc-manager && sudo rm -f /etc/systemd/system/vrc-manager.service && sudo rm -rf /srv/vrc/photo_manager", get_pty=True)
+        import time
+        time.sleep(0.5)
+        stdin.write(pwd + "\n")
+        stdin.flush()
+        stdout.channel.recv_exit_status()
+        ssh.close()
+        messagebox.showinfo("成功", "サーバーから削除しました。")
+    except Exception as e:
+        messagebox.showerror("エラー", f"削除失敗: {e}")
+
+def show_server_config_dialog():
+    """サーバー接続設定用のダイアログ"""
+    d = tk.Toplevel(root)
+    d.title("サーバー接続設定")
+    d.geometry("350x450")
+    
+    ttk.Label(d, text="SSH ホスト:").pack(pady=2)
+    h_ent = ttk.Entry(d, textvariable=server_ip_var); h_ent.pack(pady=2)
+    ttk.Label(d, text="SSH ポート:").pack(pady=2)
+    p_ent = ttk.Entry(d, textvariable=server_port_var); p_ent.pack(pady=2)
+    ttk.Label(d, text="ユーザー:").pack(pady=2)
+    u_ent = ttk.Entry(d, textvariable=server_user_var); u_ent.pack(pady=2)
+    ttk.Label(d, text="パスワード:").pack(pady=2)
+    pw_ent = ttk.Entry(d, show="*"); pw_ent.insert(0, config.get("server_pass")); pw_ent.pack(pady=2)
+    
+    ttk.Label(d, text="FastAPI ポート (WebUI用):").pack(pady=2)
+    api_ent = ttk.Entry(d, textvariable=api_port_var); api_ent.pack(pady=2)
+
+    ttk.Label(d, text="監視ディレクトリ (ローカル):").pack(pady=2)
+    dir_ent = ttk.Entry(d); dir_ent.insert(0, config.get("input_dir")); dir_ent.pack(pady=2)
+
+    def do_save():
+        config.update({
+            "server_pass": pw_ent.get(),
+            "input_dir": dir_ent.get()
+        })
+        save_settings()
+        d.destroy()
+
+    ttk.Button(d, text="保存", command=do_save).pack(pady=20)
+
+def clean_dev_files():
+    """開発用の一時ファイルを一括削除"""
+    if not messagebox.askyesno("確認", "一時ファイルやキャッシュを削除しますか？"): return
+    targets = ["config_server.json", "vrc-manager.service"]
+    count = 0
+    for f in targets:
+        if os.path.exists(f):
+            os.remove(f)
+            count += 1
+    from pathlib import Path
+    for p in Path(APP_DIR).rglob("__pycache__"):
+        import shutil
+        shutil.rmtree(p)
+        count += 1
+    messagebox.showinfo("完了", f"{count} 件のアイテムを削除しました。")
+
+def _run_local_db_import_worker():
+    """Windows上のログフォルダから DB 形式へ変換（別スレッド）"""
+    target_path = log_target_path_var.get()
+    local_source = local_log_path_var.get()
+
+    if not target_path.strip():
+        import_queue.put(("error", "DB保存先フォルダを指定してください。"))
+        return
+    if not local_source.strip() or not os.path.isdir(local_source):
+        import_queue.put(("error", "有効なWindowsログフォルダを指定してください。"))
+        return
+
+    try:
+        import_queue.put(("log", "\n" + "="*50))
+        import_queue.put(("log", "  Windows ログDB 構造化ツール"))
+        import_queue.put(("log", "="*50))
+        import_queue.put(("status", "構造化処理中..."))
+
+        # 統合DBの設定があればそれを使用し、なければ新規作成
+        db_path = master_log_db_path_var.get().strip()
+        if not db_path:
+            now = datetime.now()
+            db_path = build_db_path(target_path, db_naming_template_var.get(), {
+                'date': now.strftime('%Y%m%d'),
+                'time': now.strftime('%H%M%S'),
+            })
+        else:
+            os.makedirs(os.path.dirname(db_path), exist_ok=True)
+
+        if create_or_update_log_db(db_path, local_source):
+            import_queue.put(("log", f"✓ DBを作成しました: {db_path}"))
+            import_queue.put(("success", f"Windowsログの構造化が完了しました。\n保存先: {db_path}"))
+        else:
+            import_queue.put(("error", "DBの作成に失敗しました。"))
+            return
+        import_queue.put(("done", "completed"))
+    except Exception as e:
+        import_queue.put(("error", f"構造化処理中にエラーが発生しました:\n{e}"))
+
+def run_local_db_import():
+    """Windowsログ構造化実行（スレッド起動）"""
+    global import_thread
+    if import_thread and import_thread.is_alive():
+        messagebox.showwarning("警告", "既に処理中です。完了するまでお待ちください。")
+        return
+    status_var.set("⏱ 構造化処理中...")
+    import_thread = threading.Thread(target=_run_local_db_import_worker, daemon=True)
+    import_thread.start()
 
 def run_config():
     """接続状況を確認（Python実装）"""
@@ -1270,27 +1767,56 @@ class LogWindow:
         # ウィンドウを閉じても破棄せず非表示にするだけにする
         self.top.protocol("WM_DELETE_WINDOW", self.hide)
         
-        # コマンド入力エリア (先にBottomでパックして領域を確保)
+        # コマンド入力エリア
         self.cmd_frame = ttk.Frame(self.top, padding=(5, 2))
         self.cmd_frame.pack(side=tk.BOTTOM, fill=tk.X)
         
         self.cmd_entry = ttk.Entry(self.cmd_frame)
         self.cmd_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.cmd_entry.bind("<Return>", self.handle_command)
-
-        # コンテンツフレーム（ログ表示用 - 残りの中央領域をすべて占有）
+        
+        # コンテンツフレーム（ログ表示用 - 残りの中央領域をすべて占有）とNotebook
         self.content_frame = ttk.Frame(self.top)
         self.content_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
-        # テキストエリアとスクロールバー
-        self.text = tk.Text(self.content_frame, state='disabled', wrap='word', font=("Courier New", 9))
-        self.scroll = ttk.Scrollbar(self.content_frame, orient=tk.VERTICAL, command=self.text.yview)
+        self.notebook = ttk.Notebook(self.content_frame)
+        self.notebook.pack(fill=tk.BOTH, expand=True)
+
+        # --- コンソールタブ ---
+        self.console_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.console_frame, text="コンソール")
+
+        self.text = tk.Text(self.console_frame, state='disabled', wrap='word', font=("Courier New", 9))
+        self.scroll = ttk.Scrollbar(self.console_frame, orient=tk.VERTICAL, command=self.text.yview)
         self.text.configure(yscrollcommand=self.scroll.set)
-        
         self.scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
+        # --- 構造化ログタブ ---
+        self.structured_log_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.structured_log_frame, text="構造化ログ")
+
+        self.log_tree = ttk.Treeview(self.structured_log_frame, columns=("Timestamp", "Level", "Message"), show="headings")
+        self.log_tree.heading("Timestamp", text="タイムスタンプ")
+        self.log_tree.heading("Level", text="レベル")
+        self.log_tree.heading("Message", text="メッセージ")
+        
+        self.log_tree.column("Timestamp", width=150, stretch=tk.NO)
+        self.log_tree.column("Level", width=80, stretch=tk.NO)
+        self.log_tree.column("Message", stretch=tk.YES)
+
+        self.tree_scroll = ttk.Scrollbar(self.structured_log_frame, orient=tk.VERTICAL, command=self.log_tree.yview)
+        self.log_tree.configure(yscrollcommand=self.tree_scroll.set)
+        self.tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.log_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # 初期表示はコンソールタブ
+        self.notebook.select(self.console_frame)
+
         # スタートメッセージの表示
+        self.log_initial_message()
+
+    def log_initial_message(self):
         v, b = load_version()
         self.log("================================================================")
         self.log(f" QVPTool - Quest VRChat 写真管理ツール v{v}")
@@ -1305,6 +1831,11 @@ class LogWindow:
         self.text.insert(tk.END, message + "\n")
         self.text.see(tk.END)
         self.text.config(state='disabled')
+
+    def clear_log_tree(self):
+        """Treeview の内容をクリアする"""
+        for item in self.log_tree.get_children():
+            self.log_tree.delete(item)
 
     def handle_command(self, event):
         """コマンド入力の処理"""
@@ -1324,7 +1855,11 @@ class LogWindow:
             self.log("  /help            - このヘルプを表示")
             self.log("  /clear           - ログをクリア")
             self.log("  /config          - 現在の設定値を一覧表示")
-            self.log("  /set <key> <val> - 設定を変更 (pics_path, logs_path, suffix)")
+            self.log("  /set <key> <val> - 設定を変更")
+            self.log("  /set list        - 設定可能なキーと現在の値を一覧表示")
+            self.log("  /db import_windows - Windowsのログフォルダを解析してDBへ保存")
+            self.log("  /db import_local - Scriptフォルダ内のログを解析してDBへ保存")
+            self.log("  /logs [level]    - DBから構造化ログを読込み表示 (最新50件)")
             self.log("  /adb <args...>   - ADBコマンドを直接実行")
             
         elif cmd == "/clear":
@@ -1342,6 +1877,17 @@ class LogWindow:
             self.log(f"  ADB AutoStart : {adb_auto_start_var.get()}")
             
         elif cmd == "/set":
+            if not args:
+                self.log("エラー: /set <key> <value> または /set list と入力してください。")
+                return
+
+            if args[0].lower() == "list":
+                self.log("設定可能なキーと現在の値:")
+                self.log(f"  pics_path : {target_path_var.get()}")
+                self.log(f"  logs_path : {log_target_path_var.get()}")
+                self.log(f"  suffix    : {rename_suffix_var.get()}")
+                return
+
             if len(args) < 2:
                 self.log("エラー: /set <key> <value> の形式で入力してください。")
                 return
@@ -1362,6 +1908,52 @@ class LogWindow:
                 return
             save_settings() # 変更を反映・保存
             
+        elif cmd == "/db":
+            if args and args[0].lower() == "import_windows":
+                run_local_db_import()
+                return
+            if args and args[0].lower() == "import_local":
+                now = datetime.now()
+                db_path = build_db_path(log_target_path_var.get(), db_naming_template_var.get(), {
+                    'date': now.strftime('%Y%m%d'),
+                    'time': now.strftime('%H%M%S'),
+                })
+                self.log(f"ローカルログ(Script直下)を解析中: {db_path}")
+                # UIをフリーズさせないため別スレッドで実行
+                threading.Thread(target=lambda: create_or_update_log_db(db_path, SCRIPT_DIR), daemon=True).start()
+                self.log("バックグラウンドで解析処理を開始しました。")
+            else:
+                self.log("エラー: /db import_local と入力してください。")
+
+        elif cmd == "/logs":
+            db_path = find_latest_log_db(log_target_path_var.get())
+            if not db_path:
+                self.log("エラー: 読込み可能なDBが見つかりません。")
+                return
+            level_filter = args[0].upper() if args else None
+            
+            # 構造化ログタブに切り替えてTreeviewをクリア
+            self.notebook.select(self.structured_log_frame)
+            self.clear_log_tree()
+
+            self.log(f"--- 構造化ログ読込み開始 ({os.path.basename(db_path)}) ---")
+            try:
+                conn = sqlite3.connect(db_path)
+                query = "SELECT timestamp, level, message FROM log_records"
+                params = []
+                if level_filter:
+                    query += " WHERE level = ?"
+                    params.append(level_filter)
+                query += " ORDER BY timestamp ASC" # 全件表示（時系列）
+                cursor = conn.execute(query, params)
+                count = 0
+                for ts, lv, msg in cursor:
+                    self.log_tree.insert("", "end", values=(ts, lv, msg))
+                    count += 1
+                conn.close()
+                self.log(f"✓ {count} 件の全レコードを表示しました。")
+            except Exception as e:
+                self.log(f"読込み失敗: {e}")
         elif cmd == "/adb":
             if not args:
                 self.log("エラー: ADBコマンドを指定してください。例: /adb devices")
@@ -1448,6 +2040,7 @@ if os.path.exists(ICON_FILE):
 version, build_number = load_version()
 root.title(f"{STR.get('app_title', 'Quest VRChat Photo Tool')} v{version}")
 root.geometry("600x550")
+root.geometry("650x750")
 root.resizable(True, True)
 
 # 設定の読み込み
@@ -1457,12 +2050,17 @@ rename_suffix_var = tk.StringVar(value=config.get("rename_suffix", DEFAULT_CONFI
 photo_naming_template_var = tk.StringVar(value=config.get("photo_naming_template", DEFAULT_CONFIG["photo_naming_template"]))
 db_naming_template_var = tk.StringVar(value=config.get("db_naming_template", DEFAULT_CONFIG["db_naming_template"]))
 photo_db_path_var = tk.StringVar(value=config.get("photo_db_path", DEFAULT_CONFIG["photo_db_path"]))
+master_log_db_path_var = tk.StringVar(value=config.get("master_log_db_path", DEFAULT_CONFIG["master_log_db_path"]))
 local_log_path_var = tk.StringVar(value=config.get("local_log_path", DEFAULT_CONFIG["local_log_path"]))
 import_logs_with_photos_var = tk.BooleanVar(value=config.get("import_logs_with_photos", DEFAULT_CONFIG["import_logs_with_photos"]))
 temp_path_var = tk.StringVar(value=config.get("temp_path", DEFAULT_CONFIG["temp_path"]))
 adb_auto_start_var = tk.BooleanVar(value=config.get("adb_auto_start", DEFAULT_CONFIG["adb_auto_start"]))
 log_target_path_var = tk.StringVar(value=config.get("log_target_path", DEFAULT_CONFIG["log_target_path"]))
 log_source_path_var = tk.StringVar(value=config.get("log_source_path", DEFAULT_CONFIG["log_source_path"]))
+server_ip_var = tk.StringVar(value=config.get("server_ip", DEFAULT_CONFIG["server_ip"]))
+server_port_var = tk.StringVar(value=config.get("server_port", DEFAULT_CONFIG["server_port"]))
+server_user_var = tk.StringVar(value=config.get("server_user", DEFAULT_CONFIG["server_user"]))
+api_port_var = tk.StringVar(value=str(config.get("api_port", DEFAULT_CONFIG["api_port"])))
 photo_db_content_var = tk.StringVar(value="DB内容: 未選択")
 status_var = tk.StringVar(value=STR.get("status_waiting", "待機中..."))
 
@@ -1526,7 +2124,8 @@ paned.add(sidebar_frame, width=220)
 sidebar_label = ttk.Label(sidebar_frame, text=STR.get("sidebar", {}).get("title", "Items"), font=("Arial", 10, "bold"))
 sidebar_label.pack(anchor=tk.W, pady=(10, 5))
 
-sidebar_list = ttk.Treeview(sidebar_frame, show="tree", selectmode="browse", height=4) # heightは表示行数、Treeviewはデフォルトでスクロールバーなし
+# サーバー管理を含めた7項目を表示するため height を 7 に設定
+sidebar_list = ttk.Treeview(sidebar_frame, show="tree", selectmode="browse", height=7) 
 sidebar_list.pack(fill=tk.BOTH, expand=True)
 
 # Treeviewの項目データとアイコン
@@ -1535,6 +2134,7 @@ sidebar_items_data = [
     ("pics_item", STR.get("sidebar", {}).get("pics", " Pictures"), "pics"),
     ("logs_item", STR.get("sidebar", {}).get("logs", " Logs"), "logs"),
     ("db_item", STR.get("sidebar", {}).get("db", " DB Management"), "logs"),
+    ("server_item", " サーバー管理", "logs"), # サーバー管理をサイドバーに追加
     ("settings_item", STR.get("sidebar", {}).get("settings", " Settings"), "settings"),
     ("help_item", STR.get("sidebar", {}).get("help", " Help"), "help"),
 ]
@@ -1667,11 +2267,18 @@ ttk.Label(b_db_file_frame, textvariable=photo_db_content_var, foreground="gray",
 b_local_log_frame = ttk.LabelFrame(v_db, text="Windows ログフォルダ", padding=10)
 b_local_log_frame.pack(fill=tk.X, pady=5)
 ttk.Entry(b_local_log_frame, textvariable=local_log_path_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-ttk.Button(b_local_log_frame, text="参照", command=browse_local_log_folder).pack(side=tk.LEFT)
+ttk.Button(b_local_log_frame, text="参照", command=browse_local_log_folder).pack(side=tk.LEFT, padx=(0, 5))
+
+b_master_db_frame = ttk.LabelFrame(v_db, text="統合ログDBファイル (オプション)", padding=10)
+b_master_db_frame.pack(fill=tk.X, pady=5)
+ttk.Entry(b_master_db_frame, textvariable=master_log_db_path_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+ttk.Button(b_master_db_frame, text="参照", command=browse_master_log_db_file).pack(side=tk.LEFT)
+ttk.Label(b_master_db_frame, text="設定すると、ログインポート時にこのDBに追記されます。", foreground="gray", wraplength=560).pack(anchor=tk.W, pady=(6, 0), fill=tk.X)
 
 b_db_action_frame = ttk.Frame(v_db, padding=10)
 b_db_action_frame.pack(fill=tk.X, pady=5)
-ttk.Button(b_db_action_frame, text="WindowsログをDBに変換", command=run_db_import, width=30).pack(side=tk.LEFT, padx=(0, 5))
+ttk.Button(b_db_action_frame, text="Questログを取得してDB化", command=run_db_import, width=30).pack(side=tk.LEFT, padx=(0, 5))
+ttk.Button(b_db_action_frame, text="Windowsログを解析してDB化", command=run_local_db_import, width=30).pack(side=tk.LEFT, padx=(0, 5))
 
 b_db_summary = ttk.Label(v_db, textvariable=photo_db_content_var, foreground="gray", wraplength=560)
 b_db_summary.pack(anchor=tk.W, pady=(10, 0), fill=tk.X)
@@ -1714,6 +2321,40 @@ ttk.Button(s_btn_frame, text=STR.get("view_settings", {}).get("load_default", " 
 v_help = ttk.Frame(content_area)
 view_frames["help"] = v_help
 tk.Text(v_help, wrap=tk.WORD, font=("Courier New", 9), height=15).pack(fill=tk.BOTH, expand=True)
+
+# -- View 4: Server Management --
+v_server = ttk.Frame(content_area)
+view_frames["server"] = v_server
+srv_icon_24 = get_icon("logs", 24)
+ttk.Label(v_server, text="サーバー管理・リアルタイム監視", font=("Arial", 14, "bold"), image=srv_icon_24, compound=tk.LEFT).pack(anchor=tk.W, pady=10)
+
+srv_info_frame = ttk.LabelFrame(v_server, text="現在のサーバー設定", padding=10)
+srv_info_frame.pack(fill=tk.X, pady=5)
+
+info_grid = ttk.Frame(srv_info_frame)
+info_grid.pack(fill=tk.X)
+ttk.Label(info_grid, text="IP:").grid(row=0, column=0, sticky=tk.W)
+ttk.Label(info_grid, textvariable=server_ip_var).grid(row=0, column=1, sticky=tk.W, padx=5)
+ttk.Label(info_grid, text="SSH Port:").grid(row=1, column=0, sticky=tk.W)
+ttk.Label(info_grid, textvariable=server_port_var).grid(row=1, column=1, sticky=tk.W, padx=5)
+ttk.Label(info_grid, text="User:").grid(row=2, column=0, sticky=tk.W)
+ttk.Label(info_grid, textvariable=server_user_var).grid(row=2, column=1, sticky=tk.W, padx=5)
+ttk.Label(info_grid, text="API Port:").grid(row=3, column=0, sticky=tk.W)
+ttk.Label(info_grid, textvariable=api_port_var, foreground="blue").grid(row=3, column=1, sticky=tk.W, padx=5)
+
+ttk.Button(srv_info_frame, text="設定を変更", command=show_server_config_dialog).pack(pady=5)
+
+srv_ops_frame = ttk.LabelFrame(v_server, text="操作", padding=10)
+srv_ops_frame.pack(fill=tk.X, pady=5)
+ttk.Button(srv_ops_frame, text="サーバーへデプロイ", command=lambda: threading.Thread(target=run_deploy_worker, daemon=True).start()).pack(side=tk.LEFT, padx=5)
+ttk.Button(srv_ops_frame, text="サービス開始", command=lambda: run_service_control("start")).pack(side=tk.LEFT, padx=5)
+ttk.Button(srv_ops_frame, text="サービス停止", command=lambda: run_service_control("stop")).pack(side=tk.LEFT, padx=5)
+ttk.Button(srv_ops_frame, text="サーバーから削除", command=lambda: threading.Thread(target=run_uninstall_worker, daemon=True).start()).pack(side=tk.LEFT, padx=5)
+
+dev_frame = ttk.LabelFrame(v_server, text="開発者オプション", padding=10)
+dev_frame.pack(fill=tk.X, pady=10)
+ttk.Button(dev_frame, text="開発ファイル削除 (Cache/Temp)", command=clean_dev_files).pack(side=tk.LEFT, padx=5)
+
 v_help.winfo_children()[0].insert(1.0, load_help_text())
 v_help.winfo_children()[0].config(state=tk.DISABLED)
 
@@ -1739,7 +2380,8 @@ def process_queue():
             if msg_type == "log":
                 # ログをコンソールに出力
                 print(msg_data[0])
-                log_win.log(msg_data[0])
+                if 'log_win' in globals() and log_win:
+                    log_win.log(msg_data[0])
                 
             elif msg_type == "status":
                 # ステータスバーを更新
@@ -1783,4 +2425,17 @@ def process_queue():
 root.after(100, process_queue)
 
 # ウィンドウ表示
-root.mainloop()
+# --- Main Execution ---
+if __name__ == "__main__":
+    init_photo_db()
+    # APIサーバーを別スレッドで起動
+    threading.Thread(target=run_api, daemon=True).start()
+
+    # 終了処理の登録
+    root.protocol("WM_DELETE_WINDOW", on_app_exit)
+    
+    # リアルタイム監視の開始 (GUIの準備が整ってから起動)
+    observer = start_observer()
+
+    # Tkinter UI起動
+    root.mainloop()

@@ -12,3 +12,6 @@ scripts/main.spec
 
 # Python cache
 __pycache__/
+
+# sample logs
+scripts/sample-logs
